@@ -10,7 +10,7 @@ PREFIX = /usr/local
   INCLUDE = $(PREFIX)/include
 
 # Includes and libs
-INCLUDES = -I. -I$(ROOT)/include -I$(INCLUDE) -I/usr/include
+INCLUDES = -I. -I$(ROOT)/include -I$(INCLUDE) -I/usr/include -I/usr/include/freetype2
 LIBS = -L$(ROOT)/lib -L/usr/lib
 
 TERMINAL = xterm
@@ -37,7 +37,7 @@ AR = ar crs
 X11PACKAGES = xft
 INCX11 = $$(pkg-config --cflags $(X11PACKAGES))
 LIBICONV = # Leave blank if your libc includes iconv (glibc does)
-LIBIXP = $(LIBDIR)/libixp.a
+LIBIXP = /usr/lib/x86_64-linux-gnu/libixp.a
 
 # Operating System Configurations
 
