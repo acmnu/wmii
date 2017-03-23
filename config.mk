@@ -11,7 +11,7 @@ PREFIX = /usr/local
   PYPREFIX = --prefix=$(PREFIX)
 
 # Includes and libs
-INCLUDES = -I. -I$(ROOT)/include -I$(INCLUDE) -I/usr/include
+INCLUDES = -I. -I$(ROOT)/include -I$(INCLUDE) -I/usr/include -I/usr/include/freetype2
 LIBS = -L$(ROOT)/lib -L/usr/lib
 
 TERMINAL = xterm
