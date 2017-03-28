@@ -1,4 +1,4 @@
-/* Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+/* Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #include "dat.h"
@@ -14,24 +14,25 @@ void
 bar_init(WMScreen *s) {
 	WinAttr wa;
 
-	if(s->barwin) {
-		bar_resize(s);
+	if(s->barwin && (s->barwin->depth == 32) == s->barwin_rgba)
 		return;
-	}
 
 	s->brect = s->r;
 	s->brect.min.y = s->brect.max.y - labelh(def.font);
 
 	wa.override_redirect = 1;
-	wa.background_pixmap = ParentRelative;
 	wa.event_mask = ExposureMask
 		      | ButtonPressMask
 		      | ButtonReleaseMask
 		      | FocusChangeMask;
-	s->barwin = createwindow(&scr.root, s->brect, scr.depth, InputOutput,
-			&wa, CWOverrideRedirect
-			   | CWBackPixmap
-			   | CWEventMask);
+	if(s->barwin_rgba)
+		s->barwin = createwindow_rgba(&scr.root, s->brect,
+				&wa, CWOverrideRedirect
+				   | CWEventMask);
+	else
+		s->barwin = createwindow(&scr.root, s->brect, scr.depth, InputOutput,
+				&wa, CWOverrideRedirect
+				   | CWEventMask);
 	s->barwin->aux = s;
 	xdnd_initwindow(s->barwin);
 	sethandler(s->barwin, &handlers);
@@ -93,12 +94,12 @@ bar_create(Bar **bp, const char *name) {
 	b = emallocz(sizeof *b);
 	b->id = id++;
 	utflcpy(b->name, name, sizeof b->name);
-	b->col = def.normcolor;
+	b->colors = def.normcolor;
 
-	strlcat(b->buf, b->col.colstr, sizeof(b->buf));
-	strlcat(b->buf, " ", sizeof(b->buf));
-	strlcat(b->buf, b->text, sizeof(b->buf));
-	
+	strlcat(b->buf, b->colors.colstr, sizeof b->buf);
+	strlcat(b->buf, " ", sizeof b->buf);
+	strlcat(b->buf, b->text, sizeof b->buf);
+
 	SET(i);
 	for(sp=screens; (s = *sp); sp++) {
 		i = bp - s->bar;
@@ -130,6 +131,7 @@ bar_destroy(Bar **bp, Bar *b) {
 void
 bar_draw(WMScreen *s) {
 	Bar *b, *tb, *largest, **pb;
+	Image *ibuf;
 	Rectangle r;
 	Align align;
 	uint width, tw;
@@ -139,6 +141,7 @@ bar_draw(WMScreen *s) {
 
 	largest = nil;
 	width = 0;
+	s->barwin_rgba = false;
 	foreach_bar(s, b) {
 		b->r.min = ZP;
 		b->r.max.y = Dy(s->brect);
@@ -146,6 +149,7 @@ bar_draw(WMScreen *s) {
 		if(b->text && strlen(b->text))
 			b->r.max.x += textwidth(def.font, b->text);
 		width += Dx(b->r);
+		s->barwin_rgba += RGBA_P(b->colors);
 	}
 
 	if(width > Dx(s->brect)) { /* Not enough room. Shrink bars until they all fit. */
@@ -173,51 +177,30 @@ bar_draw(WMScreen *s) {
 		width += tw * shrink;
 	}
 
+	if(s->bar[BRight])
+		s->bar[BRight]->r.max.x += Dx(s->brect) - width;
 	tb = nil;
 	foreach_bar(s, b) {
 		if(tb)
 			b->r = rectaddpt(b->r, Pt(tb->r.max.x, 0));
-		if(b == s->bar[BRight])
-			b->r.max.x += Dx(s->brect) - width;
 		tb = b;
 	}
 
+	ibuf = s->barwin_rgba ? disp.ibuf32 : disp.ibuf;
+
 	r = rectsubpt(s->brect, s->brect.min);
-	fill(disp.ibuf, r, def.normcolor.bg);
-	border(disp.ibuf, r, 1, def.normcolor.border);
+	fill(ibuf, r, &def.normcolor.bg);
+	border(ibuf, r, 1, &def.normcolor.border);
 	foreach_bar(s, b) {
 		align = Center;
 		if(b == s->bar[BRight])
 			align = East;
-		fill(disp.ibuf, b->r, b->col.bg);
-		drawstring(disp.ibuf, def.font, b->r, align, b->text, b->col.fg);
-		border(disp.ibuf, b->r, 1, b->col.border);
+		fillstring(ibuf, def.font, b->r, align, b->text, &b->colors, 1);
 	}
-	copyimage(s->barwin, r, disp.ibuf, ZP);
-}
 
-void
-bar_load(Bar *b) {
-	 IxpMsg m;
-	 char *p, *q;
-
-	 p = b->buf;
-	 m = ixp_message(p, strlen(p), 0);
-	 msg_parsecolors(&m, &b->col);
-
-	 q = (char*)m.end-1;
-	 while(q >= (char*)m.pos && *q == '\n')
-		 *q-- = '\0';
-
-	 q = b->text;
-	 utflcpy(q, (char*)m.pos, sizeof b->text);
-
-	 p[0] = '\0';
-	 strlcat(p, b->col.colstr, sizeof b->buf);
-	 strlcat(p, " ", sizeof b->buf);
-	 strlcat(p, b->text, sizeof b->buf);
-
-	 bar_draw(b->screen);
+	if(s->barwin_rgba != (s->barwin->depth == 32))
+		bar_init(s);
+	copyimage(s->barwin, r, ibuf, ZP);
 }
 
 Bar*
@@ -240,13 +223,13 @@ findbar(WMScreen *s, Point p) {
 	Bar *b;
 
 	foreach_bar(s, b)
-		if(rect_haspoint_p(p, b->r))
+		if(rect_haspoint_p(b->r, p))
 			return b;
 	return nil;
 }
 
-static void
-bdown_event(Window *w, XButtonPressedEvent *e) {
+static bool
+bdown_event(Window *w, void *aux, XButtonPressedEvent *e) {
 	WMScreen *s;
 	Bar *b;
 
@@ -254,29 +237,31 @@ bdown_event(Window *w, XButtonPressedEvent *e) {
 	XUngrabPointer(display, e->time);
 	sync();
 
-	s = w->aux;
+	s = aux;
 	b = findbar(s, Pt(e->x, e->y));
 	if(b)
 		event("%sBarMouseDown %d %s\n", barside[b->bar], e->button, b->name);
+	return false;
 }
 
-static void
-bup_event(Window *w, XButtonPressedEvent *e) {
+static bool
+bup_event(Window *w, void *aux, XButtonPressedEvent *e) {
 	WMScreen *s;
 	Bar *b;
-	
-	s = w->aux;
+
+	s = aux;
 	b = findbar(s, Pt(e->x, e->y));
 	if(b)
 		event("%sBarClick %d %s\n", barside[b->bar], e->button, b->name);
+	return false;
 }
 
 static Rectangle
-dndmotion_event(Window *w, Point p) {
+dndmotion_event(Window *w, void *aux, Point p) {
 	WMScreen *s;
 	Bar *b;
 
-	s = w->aux;
+	s = aux;
 	b = findbar(s, p);
 	if(b) {
 		event("%sBarDND 1 %s\n", barside[b->bar], b->name);
@@ -285,10 +270,11 @@ dndmotion_event(Window *w, Point p) {
 	return ZR;
 }
 
-static void
-expose_event(Window *w, XExposeEvent *e) {
+static bool
+expose_event(Window *w, void *aux, XExposeEvent *e) {
 	USED(w, e);
-	bar_draw(w->aux);
+	bar_draw(aux);
+	return false;
 }
 
 static Handlers handlers = {

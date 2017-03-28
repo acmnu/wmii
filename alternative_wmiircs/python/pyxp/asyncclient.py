@@ -1,193 +1,195 @@
 from pyxp import client, fcall
 from pyxp.client import *
+from functools import wraps
 
-def awithfile(*oargs, **okwargs):
-    def wrapper(fn):
-        def next(self, path, *args, **kwargs):
-            def next(file, exc, tb):
-                fn(self, (file, exc, tb), *args, **kwargs)
-            self.aopen(path, next, *oargs, **okwargs)
-        return next
+def send(iter, val, default=None):
+    try:
+        return iter.send(val)
+    except StopIteration:
+        return default
+
+def awithfile(fn):
+    @wraps(fn)
+    def wrapper(self, path, *args, **kwargs):
+        gen = fn(self, *args, **kwargs)
+        callback, fail, mode = next(gen)
+        def cont(file):
+            send(gen, file)
+        self.aopen(path, cont, fail=fail or callback, mode=mode)
     return wrapper
-def wrap_callback(fn, file):
-    def callback(data, exc, tb):
-        file.close()
-        Client.respond(fn, data, exc, tb)
-    return callback
+
+def requestchain(fn):
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        gen = fn(self, *args, **kwargs)
+        callback, fail = next(gen)
+
+        def cont(val):
+            data = gen.send(val)
+            if isinstance(data, fcall.Fcall):
+                self._dorpc(data, cont, fail or callback)
+            else:
+                Client.respond(callback, data)
+        cont(None)
+    return wrapper
 
 class Client(client.Client):
     ROOT_FID = 0
 
-    def _awalk(self, path, callback, fail=None):
-        ctxt = dict(path=path, fid=self._getfid(), ofid=ROOT_FID)
-        def next(resp=None, exc=None, tb=None):
-            if exc and ctxt['ofid'] != ROOT_FID:
-                self._aclunk(ctxt['fid'])
-            if not ctxt['path'] and resp or exc:
-                if exc and fail:
-                    return self.respond(fail, None, exc, tb)
-                return self.respond(callback, ctxt['fid'], exc, tb)
-            wname = ctxt['path'][:fcall.MAX_WELEM]
-            ofid = ctxt['ofid']
-            ctxt['path'] = ctxt['path'][fcall.MAX_WELEM:]
-            if resp:
-                ctxt['ofid'] = ctxt['fid']
-            self._dorpc(fcall.Twalk(fid=ofid,
-                                   newfid=ctxt['fid'],
-                                   wname=wname),
-                       next)
-        next()
+    def _awalk(fn):
+        @wraps(fn)
+        @requestchain
+        def wrapper(self, *args, **kwargs):
+            gen = fn(self, *args, **kwargs)
+            path, callback, fail = next(gen)
+
+            path = self._splitpath(path)
+            fid  = self._getfid()
+            ofid = ROOT_FID
+
+            def fail_(resp, exc, tb):
+                if ofid != ROOT_FID:
+                    self._aclunk(fid)
+                self.respond(fail or callback, resp, exc, tb)
+            yield callback, fail_
+
+            while path:
+                wname = path[:fcall.MAX_WELEM]
+                path = path[fcall.MAX_WELEM:]
+
+                resp = yield fcall.Twalk(fid=ofid, newfid=fid, wname=wname)
+                ofid = fid
+
+            resp = fid
+            while resp is not None:
+                resp = yield send(gen, resp)
+
+        return wrapper
 
     _file = property(lambda self: File)
-    def _aopen(self, path, mode, open, callback, fail=None, origpath=None):
-        resp = None
-        def next(fid, exc, tb):
-            def next(resp, exc, tb):
-                def cleanup():
-                    self._clunk(fid)
-                file = self._file(self, origpath or '/'.join(path), resp, fid, mode, cleanup)
-                self.respond(callback, file)
-            self._dorpc(open(fid), next, fail or callback)
-        self._awalk(path, next, fail or callback)
+
+    @_awalk
+    def _aopen(self, path, mode, fcall, callback, fail=None, origpath=None):
+        path = self._splitpath(path)
+
+        fcall.fid = yield path, callback, fail
+        resp = yield fcall
+        yield self._file(self, origpath or '/'.join(path), resp, fcall.fid, mode,
+                         cleanup=lambda: self._aclunk(fcall.fid))
 
     def aopen(self, path, callback=True, fail=None, mode=OREAD):
         assert callable(callback)
-        path = self._splitpath(path)
-        def open(fid):
-            return fcall.Topen(fid=fid, mode=mode)
-        return self._aopen(path, mode, open, fail or callback)
+        self._aopen(path, mode, fcall.Topen(mode=mode), callback, fail)
 
     def acreate(self, path, callback=True, fail=None, mode=OREAD, perm=0):
         path = self._splitpath(path)
         name = path.pop()
-        def open(fid):
-            return fcall.Tcreate(fid=fid, mode=mode, name=name, perm=perm)
-        if not callable(callback):
-            def callback(resp, exc, tb):
-                if resp:
-                    resp.close()
-        return self._aopen(path, mode, open, callback, fail,
-                           origpath='/'.join(path + [name]))
 
+        self._aopen(path, mode,
+                    fcall.Tcreate(mode=mode, name=name, perm=perm),
+                    callback if callable(callback) else lambda resp: resp and resp.close(),
+                    fail, origpath='/'.join(path + [name]))
+
+    @_awalk
     def aremove(self, path, callback=True, fail=None):
-        path = self._splitpath(path)
-        def next(fid, exc, tb):
-            self._dorpc(fcall.Tremove(fid=fid), callback, fail)
-        self._awalk(path, next, callback, fail)
+        yield fcall.Tremove(fid=(yield path, callback, fail))
 
-    def astat(self, path, callback, fail = None):
-        path = self._splitpath(path)
-        def next(fid, exc, tb):
-            def next(resp, exc, tb):
-                callback(resp.stat, exc, tb)
-            self._dorpc(fcall.Tstat(fid=fid), next, callback)
+    @_awalk
+    def astat(self, path, callback, fail=None):
+        resp = yield fcall.Tstat(fid=(yield path, callback, fail))
+        yield resp.stat
 
-    @awithfile()
-    def aread(self, (file, exc, tb), callback, *args, **kwargs):
-        if exc:
-            callback(file, exc, tb)
-        else:
-            file.aread(wrap_callback(callback, file), *args, **kwargs)
-    @awithfile(mode=OWRITE)
-    def awrite(self, (file, exc, tb), data, callback=True, *args, **kwargs):
-        if exc:
-            self.respond(callback, file, exc, tb)
-        else:
-            file.awrite(data, wrap_callback(callback, file), *args, **kwargs)
-    @awithfile()
-    def areadlines(self, (file, exc, tb), fn):
-        def callback(resp):
-            if resp is None:
-                file.close()
-            if fn(resp) is False:
-                file.close()
-                return False
-        if exc:
-            callback(None)
-        else:
-            file.sreadlines(callback)
+    @awithfile
+    def aread(self, callback, fail=None, count=None, offset=None, buf=''):
+        file = yield callback, fail, OREAD
+        file.aread(callback, fail, count, offset, buf)
+
+    @awithfile
+    def awrite(self, data, callback=True, fail=None, offset=None):
+        file = yield callback, fail, OWRITE
+        file.awrite(data, callback, fail, offset)
+
+    @awithfile
+    def areadlines(self, callback):
+        file = yield callback, fail, OREAD
+        file.areadlines(callback)
 
 class File(client.File):
-    @staticmethod
-    def respond(callback, data, exc=None, tb=None):
-        if callable(callback):
-            callback(data, exc, tb)
 
-    def stat(self, callback):
-        def next(resp, exc, tb):
-            callback(resp.stat, exc, tb)
-        resp = self._dorpc(fcall.Tstat(), next, callback)
+    @requestchain
+    def stat(self, callback, fail=None):
+        yield callback, fail
+        resp = yield fcall.Tstat()
+        yield resp.stat
 
+    @requestchain
     def aread(self, callback, fail=None, count=None, offset=None, buf=''):
-        ctxt = dict(res=[], count=self.iounit, offset=self.offset)
-        if count is not None:
-            ctxt['count'] = count
-        if offset is not None:
-            ctxt['offset'] = offset
-        def next(resp=None, exc=None, tb=None):
-            if resp and resp.data:
-                ctxt['res'].append(resp.data)
-                ctxt['offset'] += len(resp.data)
-            if ctxt['count'] == 0:
-                if offset is None:
-                    self.offset = ctxt['offset']
-                return callback(''.join(ctxt['res']), exc, tb)
+        yield callback, fail
 
-            n = min(ctxt['count'], self.iounit)
-            ctxt['count'] -= n
+        setoffset = offset is None
+        if count is None:
+            count = self.iounit
+        if offset is  None:
+            offset = self.offset
 
-            self._dorpc(fcall.Tread(offset=ctxt['offset'], count=n),
-                       next, fail or callback)
-        next()
+        res = []
+        while count > 0:
+            n = min(count, self.iounit)
+            count -= n
+            resp = yield fcall.Tread(offset=offset, count=n)
+            res.append(resp.data)
+            offset += len(resp.data)
+            if len(resp.data) == 0:
+                break
+
+        if setoffset:
+            self.offset = offset
+        yield ''.join(res)
 
     def areadlines(self, callback):
-        ctxt = dict(last=None)
-        def next(data, exc, tb):
+        class ctxt:
+            last = None
+        def cont(data, exc, tb):
             res = True
             if data:
                 lines = data.split('\n')
-                if ctxt['last']:
-                    lines[0] = ctxt['last'] + lines[0]
+                if ctxt.last:
+                    lines[0] = ctxt.last + lines[0]
                 for i in range(0, len(lines) - 1):
                     res = callback(lines[i])
                     if res is False:
-                        break
-                ctxt['last'] = lines[-1]
-                if res is not False:
-                    self.aread(next)
+                        return
+                ctxt.last = lines[-1]
+                self.aread(cont)
             else:
-                if ctxt['last']:
-                    callback(ctxt['last'])
+                if ctxt.last:
+                    callback(ctxt.last)
                 callback(None)
-        self.aread(next)
+        self.aread(cont)
 
+    @requestchain
     def awrite(self, data, callback=True, fail=None, offset=None):
-        ctxt = dict(offset=self.offset, off=0)
-        if offset is not None:
-            ctxt['offset'] = offset
-        def next(resp=None, exc=None, tb=None):
-            if resp:
-                ctxt['off'] += resp.count
-                ctxt['offset'] += resp.count
-            if ctxt['off'] < len(data) or not (exc or resp):
-                n = min(len(data), self.iounit)
+        yield callback, fail
+        setoffset = offset is None
+        if offset is None:
+            offset = self.offset
 
-                self._dorpc(fcall.Twrite(offset=ctxt['offset'],
-                                        data=data[ctxt['off']:ctxt['off']+n]),
-                           next, fail or callback)
-            else:
-                if offset is None:
-                    self.offset = ctxt['offset']
-                self.respond(callback, ctxt['off'], exc, tb)
-        next()
+        off = 0
+        while off < len(data):
+            n = min(len(data), self.iounit)
+            resp = yield fcall.Twrite(offset=offset, data=data[off:off+n])
+            off    += resp.count
+            offset += resp.count
 
+        if setoffset:
+            self.offset = offset
+        yield off
+
+    @requestchain
     def aremove(self, callback=True, fail=None):
-        def next(resp, exc, tb):
-            self.close()
-            if exc and fail:
-                self.respond(fail, resp and True, exc, tb)
-            else:
-                self.respond(callback, resp and True, exc, tb)
-        self._dorpc(fcall.Tremove(), next)
+        yield callback, fail
+        yield fcall.Tremove()
+        self.close()
+        yield True
 
 # vim:se sts=4 sw=4 et:

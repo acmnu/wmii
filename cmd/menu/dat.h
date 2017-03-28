@@ -7,11 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <util.h>
 #include <ixp.h>
-#include <x11.h>
-
-#define BLOCK(x) do { x; }while(0)
+#include <stuff/x.h>
+#include <stuff/util.h>
 
 #ifndef EXTERN
 # define EXTERN extern
@@ -31,6 +29,7 @@ enum {
 	LBACKWARD,
 	LCHAR,
 	LCOMPLETE,
+	LDELETE,
 	LFIRST,
 	LFORWARD,
 	LHISTORY,
@@ -40,6 +39,7 @@ enum {
 	LLITERAL,
 	LNEXT,
 	LNEXTPAGE,
+	LPASTE,
 	LPREV,
 	LPREVPAGE,
 	LREJECT,
@@ -69,48 +69,40 @@ EXTERN struct {
 	int	filter_start;
 } input;
 
+EXTERN struct {
+	Window*		win;
+	Image*		buf;
+	char*		prompt;
+	int		height;
+	int		rows;
+	bool		ontop;
+	Rectangle	itemr;
+	Point		arrow;
+} menu;
+
 extern char	binding_spec[];
-
-EXTERN int	numlock;
-
-EXTERN long	xtime;
-EXTERN Image*	ibuf;
-EXTERN Font*	font;
-EXTERN CTuple	cnorm, csel;
-EXTERN bool	ontop;
-
-EXTERN Cursor	cursor[1];
-EXTERN Visual*	render_visual;
 
 EXTERN IxpServer	srv;
 
-EXTERN Window*	barwin;
+EXTERN struct {
+	Item*	all;
+	Item*	first;
+	Item*	start;
+	Item*	end;
+	Item*	sel;
+	int	maxwidth;
+} match;
 
-EXTERN Item*	items;
-EXTERN Item*	matchfirst;
-EXTERN Item*	matchstart;
-EXTERN Item*	matchend;
-EXTERN Item*	matchidx;
+Font*		font;
+CTuple		cnorm;
+CTuple		csel;
 
 EXTERN Item	hist;
-EXTERN Item*	histidx;
+EXTERN Item*	histsel;
 
-EXTERN int	maxwidth;
+EXTERN int	itempad;
 EXTERN int	result;
 
-EXTERN  char*	(*find)(const char*, const char*);
-EXTERN  int	(*compare)(const char*, const char*, size_t);
-
-EXTERN char*	prompt;
-EXTERN int	promptw;
-
-EXTERN char	buffer[8092];
-EXTERN char*	_buffer;
-
-static char*	const _buf_end = buffer + sizeof buffer;
-
-#define bufclear() \
-	BLOCK( _buffer = buffer; _buffer[0] = '\0' )
-#define bufprint(...) \
-	_buffer = seprint(_buffer, _buf_end, __VA_ARGS__)
+EXTERN char*	(*find)(const char*, const char*);
+EXTERN int	(*compare)(const char*, const char*, size_t);
 

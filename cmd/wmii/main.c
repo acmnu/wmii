@@ -1,5 +1,5 @@
 /* Copyright ©2004-2006 Anselm R. Garbe <garbeam at gmail dot com>
- * Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+ * Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #define EXTERN
@@ -12,7 +12,6 @@
 #include <pwd.h>
 #include <sys/signal.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include "fns.h"
 
 static const char
@@ -43,24 +42,22 @@ scan_wins(void) {
 	uint num;
 	XWindow *wins;
 	XWindowAttributes wa;
-	XWindow d1, d2;
+	XWindow root, parent;
 
-	if(XQueryTree(display, scr.root.xid, &d1, &d2, &wins, &num)) {
+	if(XQueryTree(display, scr.root.xid, &root, &parent, &wins, &num)) {
 		for(i = 0; i < num; i++) {
-			if(!XGetWindowAttributes(display, wins[i], &wa))
+			if(!XGetWindowAttributes(display, wins[i], &wa) || wa.override_redirect)
 				continue;
-			/* Skip transients. */
-			if(wa.override_redirect || XGetTransientForHint(display, wins[i], &d1))
-				continue;
+			if(!XGetTransientForHint(display, wins[i], &parent))
 			if(wa.map_state == IsViewable)
 				client_create(wins[i], &wa);
 		}
 		/* Manage transients. */
 		for(i = 0; i < num; i++) {
-			if(!XGetWindowAttributes(display, wins[i], &wa))
+			if(!XGetWindowAttributes(display, wins[i], &wa) || wa.override_redirect)
 				continue;
-			if((XGetTransientForHint(display, wins[i], &d1))
-			&& (wa.map_state == IsViewable))
+			if(XGetTransientForHint(display, wins[i], &parent))
+			if(wa.map_state == IsViewable)
 				client_create(wins[i], &wa);
 		}
 	}
@@ -95,9 +92,9 @@ init_environment(void) {
 		setenv("WMII_ADDRESS", address, true);
 	else
 		address = smprint("unix!%s/wmii", ns_path);
-	setenv("WMII_CONFPATH", sxprint("%s/.wmii%s:%s/wmii%s",
-					getenv("HOME"), CONFVERSION,
-					CONFPREFIX, CONFVERSION), true);
+	setenv("WMII_CONFPATH",
+	       sxprint("%s/.%s:%s", getenv("HOME"), CONFDIR, GLOBALCONF),
+	       true);
 }
 
 static void
@@ -163,6 +160,7 @@ regerror(char *err) {
 
 void
 init_screens(void) {
+	static int old_n, old_nscreens;
 	Rectangle *rects;
 	View *v;
 	int i, n, m;
@@ -178,35 +176,29 @@ init_screens(void) {
 
 	/* Reallocate screens, zero any new ones. */
 	rects = xinerama_screens(&n);
-	m = max(n, nscreens);
-	screens = erealloc(screens, (m + 1) * sizeof *screens);
-	screens[m] = nil;
+	m = nscreens;
+	nscreens = max(n, nscreens);
+	screens = erealloc(screens, (nscreens + 1) * sizeof *screens);
+	screens[nscreens] = nil;
 	for(v=view; v; v=v->next) {
-		v->areas = erealloc(v->areas, m * sizeof *v->areas);
-		v->r = erealloc(v->r, m * sizeof *v->r);
-		v->pad = erealloc(v->pad, m * sizeof *v->pad);
+		v->areas = erealloc(v->areas, nscreens * sizeof *v->areas);
+		v->r = erealloc(v->r, nscreens * sizeof *v->r);
+		v->pad = erealloc(v->pad, nscreens * sizeof *v->pad);
 	}
-
-	for(i=nscreens; i < m; i++) {
-		screens[i] = emallocz(sizeof *screens[i]);
-		for(v=view; v; v=v->next)
-			view_init(v, i);
-	}
-
-	nscreens = m;
 
 	/* Reallocate buffers. */
-	freeimage(ibuf);
-	freeimage(ibuf32);
-	ibuf = allocimage(Dx(scr.rect), Dy(scr.rect), scr.depth);
-	ibuf32 = nil; /* Probably shouldn't do this until it's needed. */
+	freeimage(disp.ibuf);
+	freeimage(disp.ibuf32);
+	disp.ibuf = allocimage(Dx(scr.rect), Dy(scr.rect), scr.depth);
+	disp.ibuf32 = nil; /* Probably shouldn't do this until it's needed. */
 	if(render_visual)
-		ibuf32 = allocimage(Dx(scr.rect), Dy(scr.rect), 32);
-	disp.ibuf = ibuf;
-	disp.ibuf32 = ibuf32;
+		disp.ibuf32 = allocimage(Dx(scr.rect), Dy(scr.rect), 32);
 
 	/* Resize and initialize screens. */
 	for(i=0; i < nscreens; i++) {
+		if(i >= m)
+			screens[i] = emallocz(sizeof *screens[i]);
+
 		screen = screens[i];
 		screen->idx = i;
 
@@ -215,16 +207,25 @@ init_screens(void) {
 			screen->r = rects[i];
 		else
 			screen->r = rectsetorigin(screen->r, scr.rect.max);
+		if(i >= m)
+			for(v=view; v; v=v->next)
+				view_init(v, i);
 		def.snap = Dy(screen->r) / 63;
 		bar_init(screens[i]);
 	}
 	screen = screens[0];
 	if(selview)
 		view_update(selview);
+
+	if (old_n != n || old_nscreens != nscreens)
+		event("ScreenChange %d %d\n", n, nscreens);
+	old_n = n;
+	old_nscreens = nscreens;
 }
 
 static void
 cleanup(void) {
+	starting = -1;
 	while(client)
 		client_destroy(client);
 	ixp_server_close(&srv);
@@ -319,13 +320,6 @@ spawn_command(const char *cmd) {
 }
 
 static void
-check_preselect(IxpServer *s) {
-	USED(s);
-
-	check_x_event(nil);
-}
-
-static void
 closedisplay(IxpConn *c) {
 	USED(c);
 
@@ -339,17 +333,18 @@ printfcall(IxpFcall *f) {
 
 int
 main(int argc, char *argv[]) {
-	IxpMsg m;
 	char **oargv;
-	char *wmiirc, *s;
+	char *wmiirc;
 	int i;
 
-	quotefmtinstall();
+	IXP_ASSERT_VERSION;
+
+	setlocale(LC_CTYPE, "");
 	fmtinstall('r', errfmt);
 	fmtinstall('a', afmt);
 	fmtinstall('C', Cfmt);
-extern int fmtevent(Fmt*);
 	fmtinstall('E', fmtevent);
+	quotefmtinstall();
 
 	wmiirc = "wmiirc";
 
@@ -362,12 +357,13 @@ extern int fmtevent(Fmt*);
 		wmiirc = EARGF(usage());
 		break;
 	case 'v':
-		print("%s", version);
+		lprint(1, "%s", version);
 		exit(0);
 	case 'D':
-		s = EARGF(usage());
-		m = ixp_message(s, strlen(s), 0);
-		msg_debug(&m);
+		if(waserror())
+			fatal("parsing debug flags: %r");
+		msg_debug(EARGF(usage()));
+		poperror();
 		break;
 	default:
 		usage();
@@ -377,19 +373,18 @@ extern int fmtevent(Fmt*);
 	if(argc)
 		usage();
 
-	setlocale(LC_CTYPE, "");
 	starting = true;
 
 	initdisplay();
 
 	traperrors(true);
-	selectinput(&scr.root, EnterWindowMask
-			     | SubstructureRedirectMask);
+	selectinput(&scr.root, SubstructureRedirectMask);
 	if(traperrors(false))
 		fatal("another window manager is already running");
 
 	passwd = getpwuid(getuid());
 	user = estrdup(passwd->pw_name);
+	gethostname(hostname, sizeof(hostname) - 1);
 
 	init_environment();
 
@@ -398,7 +393,7 @@ extern int fmtevent(Fmt*);
 
 	sock = ixp_announce(address);
 	if(sock < 0)
-		fatal("Can't create socket '%s': %r", address);
+		fatal("Can't create socket %q: %r", address);
 	closeexec(ConnectionNumber(display));
 	closeexec(sock);
 
@@ -407,13 +402,15 @@ extern int fmtevent(Fmt*);
 
 	init_traps();
 	init_cursors();
-	init_lock_keys();
+	update_keys();
 	ewmh_init();
 	xext_init();
 
-	srv.preselect = check_preselect;
-	ixp_listen(&srv, sock, &p9srv, serve_9pcon, nil);
-	ixp_listen(&srv, ConnectionNumber(display), nil, check_x_event, closedisplay);
+	event_debug = debug_event;
+
+	srv.preselect = event_preselect;
+	ixp_listen(&srv, sock, &p9srv, ixp_serve9conn, nil);
+	ixp_listen(&srv, ConnectionNumber(display), nil, event_fdready, closedisplay);
 
 	def.border = 1;
 	def.colmode = Colstack;
@@ -421,10 +418,9 @@ extern int fmtevent(Fmt*);
 	def.incmode = ISqueeze;
 
 	def.mod = Mod1Mask;
-	strcpy(def.grabmod, "Mod1");
 
-	loadcolor(&def.focuscolor, FOCUSCOLORS);
-	loadcolor(&def.normcolor, NORMCOLORS);
+	loadcolor(&def.focuscolor, FOCUSCOLORS, nil);
+	loadcolor(&def.normcolor, NORMCOLORS, nil);
 
 	disp.sel = pointerscreen();
 

@@ -13,29 +13,8 @@ struct Key {
 	char**	action;
 };
 
-static Key* bindings;
-
-static void
-init_numlock(void) {
-	static int masks[] = {
-		ShiftMask, LockMask, ControlMask, Mod1Mask,
-		Mod2Mask, Mod3Mask, Mod4Mask, Mod5Mask
-	};
-	XModifierKeymap *modmap;
-	KeyCode kcode;
-	int i, max;
-
-	modmap = XGetModifierMapping(display);
-	kcode = keycode("Num_Lock");
-	if(kcode)
-	if(modmap && modmap->max_keypermod > 0) {
-		max = nelem(masks) * modmap->max_keypermod;
-		for(i = 0; i < max; i++)
-			if(modmap->modifiermap[i] == kcode)
-				numlock = masks[i / modmap->max_keypermod];
-	}
-	XFreeModifiermap(modmap);
-}
+static Key*	bindings;
+static int	numlock;
 
 /*
  * To do: Find my red black tree implementation.
@@ -50,7 +29,7 @@ parse_keys(char *spec) {
 	int i, nlines, nwords;
 
 	if(!numlock)
-		init_numlock();
+		numlock = numlockmask();
 
 	nlines = tokenize(lines, nelem(lines), spec, '\n');
 	for(i=0; i < nlines; i++) {
@@ -96,6 +75,7 @@ char *symtab[] = {
 	"backward",
 	"char",
 	"complete",
+	"delete",
 	"first",
 	"forward",
 	"history",
@@ -105,6 +85,7 @@ char *symtab[] = {
 	"literal",
 	"next",
 	"nextpage",
+	"paste",
 	"prev",
 	"prevpage",
 	"reject",

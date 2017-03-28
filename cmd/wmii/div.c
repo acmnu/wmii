@@ -1,4 +1,4 @@
-/* Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+/* Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #include "dat.h"
@@ -72,7 +72,7 @@ drawimg(Image *img, Color cbg, Color cborder, Divide *d) {
 
 	w = Dx(img->r)/2;
 	n = 0;
-	pt[n++] = Pt(w    ,	0);
+	pt[n++] = Pt(w,		0);
 	pt[n++] = Pt(0,		0);
 	pt[n++] = Pt(w - 1,	w - 1);
 
@@ -86,15 +86,15 @@ drawimg(Image *img, Color cbg, Color cborder, Divide *d) {
 	start = d->left		? 0 : n/2;
 	n = d->right && d->left ? n : n/2;
 
-	fillpoly(img, pt + start, n, cbg);
-	drawpoly(img, pt + start, n, CapNotLast, 1, cborder);
+	fillpoly(img, pt + start, n, &cbg);
+	drawpoly(img, pt + start, n, CapNotLast, 1, &cborder);
 }
 
 static void
 drawdiv(Divide *d) {
 
-	fill(divmask, divmask->r, (Color){0});
-	drawimg(divmask, (Color){1}, (Color){1}, d);
+	fill(divmask, divmask->r, &(Color){0});
+	drawimg(divmask, (Color){~0,~0,~0}, (Color){~0,~0,~0}, d);
 	drawimg(divimg, divcolor.bg, divcolor.border, d);
 
 	copyimage(d->w, divimg->r, divimg, ZP);
@@ -140,7 +140,7 @@ div_update_all(void) {
 	dp = &divs;
 	ap = nil;
 	foreach_column(v, s, a) {
-		if (ap && ap->screen != s)
+		if(ap && ap->screen != s)
 			ap = nil;
 
 		d = getdiv(&dp);
@@ -163,24 +163,26 @@ div_update_all(void) {
 }
 
 /* Div Handlers */
-static void
-bdown_event(Window *w, XButtonEvent *e) {
+static bool
+bdown_event(Window *w, void *aux, XButtonEvent *e) {
 	Divide *d;
 
 	USED(e);
-	
-	d = w->aux;
+
+	d = aux;
 	mouse_resizecol(d);
+	return false;
 }
 
-static void
-expose_event(Window *w, XExposeEvent *e) {
+static bool
+expose_event(Window *w, void *aux, XExposeEvent *e) {
 	Divide *d;
-	
+
 	USED(e);
-	
-	d = w->aux;
+
+	d = aux;
 	drawdiv(d);
+	return false;
 }
 
 static Handlers handlers = {

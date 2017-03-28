@@ -1,4 +1,4 @@
-/* Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+/* Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #include "dat.h"
@@ -10,7 +10,8 @@ static void float_placeframe(Frame*);
 void
 float_attach(Area *a, Frame *f) {
 
-	f->client->floating = true;
+	if(f->client->floating == Off)
+		f->client->floating = On;
 
 	f->r = f->floatr;
 	float_placeframe(f);
@@ -36,8 +37,11 @@ float_detach(Frame *f) {
 	frame_remove(f);
 
 	if(a->sel == f) {
+		while(pr && pr->client->nofocus)
+			pr = pr->aprev;
 		if(!pr)
-			pr = a->frame;
+			for(pr=a->frame; pr && pr->anext; pr=pr->anext)
+				if(!pr->client->nofocus) break;
 		a->sel = nil;
 		area_setsel(a, pr);
 	}
@@ -45,7 +49,7 @@ float_detach(Frame *f) {
 
 	if(oldsel)
 		area_focus(oldsel);
-	else if(!a->frame)
+	else if(!a->frame || pr && pr->client->nofocus)
 		if(sel && sel->frame)
 			area_focus(sel);
 }
@@ -67,12 +71,11 @@ float_arrange(Area *a) {
 
 	switch(a->mode) {
 	case Coldefault:
-		for(f=a->frame; f; f=f->anext)
-			f->collapsed = false;
 		break;
 	case Colstack:
 		for(f=a->frame; f; f=f->anext)
-			f->collapsed = (f != a->sel);
+			f->collapsed = !(f->client->w.ewmh.type & (TypeDock|TypeMenu|TypeToolbar))
+				    && (f != a->sel);
 		break;
 	default:
 		die("not reached");
@@ -160,12 +163,14 @@ float_placeframe(Frame *f) {
 	Vector_rect *vp;
 	Rectangle r;
 	Point dim, p;
+	Area *a, *sel;
 	Client *c;
 	Frame *ff;
-	Area *a, *sel;
+	View *v;
 	long area, l;
 	int i, s;
 
+	v = f->view;
 	a = f->area;
 	c = f->client;
 
@@ -198,19 +203,23 @@ float_placeframe(Frame *f) {
 	 */
 	s = -1;
 	ff = client_groupframe(c, f->view);
-	if (f->screen >= 0)
+	if(f->screen >= 0)
 		s = f->screen;
-	else if (ff)
+	else if(ff)
 		s = ownerscreen(ff->r);
-	else if (selclient())
+	else if(selclient())
 		s = ownerscreen(selclient()->sel->r);
 	else {
 		sel = view_findarea(a->view, a->view->selscreen, a->view->selcol, false);
-		if (sel)
+		if(sel)
 			s = sel->screen;
 	}
 
-	r = s == -1 ? a->r : screens[s]->r;
+	if (s == -1)
+		r = a->r;
+	else
+		r = v->r[s];
+
 	vp = unique_rects(&vec, r);
 
 	area = LONG_MAX;

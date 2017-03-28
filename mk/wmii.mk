@@ -1,27 +1,40 @@
 
 VERS = hg$$(hg identify -n)
 VERS = $$(test -n "$$WMII_HGVERSION" && echo $$WMII_HGVERSION || \
-          hg log -r $$(hg id 2>/dev/null | awk -F'[+ ]' '{print $$1}') --template 'hg{rev}' 2>/dev/null)
+          echo -n "hg$$(hg id -n 2>/dev/null)")
 
 WMII_HGVERSION = $(VERS)
-WMII_HGVERSION := $(shell echo $(VERS))
-WMII_HGVERSION != echo $(VERS)
+WMII_HGVERSION:= $(shell echo $(VERS))
+WMII_HGVERSION!= echo $(VERS)
+
 VERSION = $(WMII_HGVERSION)
-CONFVERSION = -hg
-COPYRIGHT = ©2009 Kris Maglione
+COPYRIGHT = ©2010 Kris Maglione
+
+CONFDIR = wmii-hg
+LOCALCONF = ~/.$(CONFDIR)
+GLOBALCONF = $(ETC)/$(CONFDIR)
 
 .MAKE.EXPORTED += WMII_HGVERSION
 SUBMAKE_EXPORT = WMII_HGVERSION=$(WMII_HGVERSION)
 
-LIBS9 = $(ROOT)/lib/libregexp9.a $(ROOT)/lib/libbio.a $(ROOT)/lib/libfmt.a $(ROOT)/lib/libutf.a
+LIBS9 = $(ROOT)/lib/libstuff.a $(ROOT)/lib/libregexp9.a $(ROOT)/lib/libbio.a $(ROOT)/lib/libfmt.a $(ROOT)/lib/libutf.a
 
 CFLAGS += '-DVERSION=\"$(VERSION)\"' '-DCOPYRIGHT=\"$(COPYRIGHT)\"' \
-	  '-DCONFVERSION=\"$(CONFVERSION)\"' '-DCONFPREFIX=\"$(ETC)\"'
-FILTER = sed "s|@CONFPREFIX@|$(ETC)|g; \
-	      s|@CONFVERSION@|$(CONFVERSION)|g; \
-	      s|@DOCDIR@|$(DOC)|g; \
-	      s|@VERSION@|$(VERSION)|g; \
-	      s|@LIBDIR@|$(LIBDIR)|g; \
+	  '-DCONFDIR=\"$(CONFDIR)\"' '-DCONFPREFIX=\"$(ETC)\"' \
+	  '-DLOCALCONF=\"$(LOCALCONF)\"' '-DGLOBALCONF=\"$(GLOBALCONF)\"' \
+	  -DIXP_NEEDAPI=129
+
+FILTER = sed "s|@ALTDOC@|$(DOC)/alternative_wmiircs|g; \
 	      s|@BINSH@|$(BINSH)|g; \
-	      s|@TERMINAL@|$(TERMINAL)|g;"
+	      s|@CONFDIR@|$(CONFDIR)|g; \
+	      s|@CONFPREFIX@|$(ETC)|g; \
+	      s|@DOCDIR@|$(DOC)|g; \
+	      s|@EXAMPLES@|$(DOC)/examples|g; \
+	      s|@GLOBALCONF@|$(GLOBALCONF)|g; \
+	      s|@LIBDIR@|$(LIBDIR)|g; \
+	      s|@LOCALCONF@|$(LOCALCONF)|g; \
+	      s|@PYTHON@|$(PYTHON)|g; \
+	      s|@TERMINAL@|$(TERMINAL)|g; \
+	      s|@VERSION@|$(VERSION)|g; \
+	      /^@@/d;"
 

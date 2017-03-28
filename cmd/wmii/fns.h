@@ -1,6 +1,8 @@
-/* Copyright ©2007-2009 Kris Maglione <jg@suckless.org>
+/* Copyright ©2007-2010 Kris Maglione <jg@suckless.org>
  * See LICENSE file for license details.
  */
+
+#include <setjmp.h>
 
 #ifdef VARARGCK
 # pragma varargck	argpos	debug	2
@@ -8,8 +10,8 @@
 # pragma varargck	argpos	event	1
 # pragma varargck	argpos	warning	1
 #
-# pragma varargck	type	"a"	Area*	
-# pragma varargck	type	"C"	Client*	
+# pragma varargck	type	"a"	Area*
+# pragma varargck	type	"C"	Client*
 # pragma varargck	type	"r"	void
 #endif
 
@@ -22,21 +24,27 @@
 /* Grotesque, but worth it. */
 
 #define foreach_area(v, s, a) \
-	with(int, __alive)                            \
-	with(Area*, __anext)                          \
-	for(s=0; _cond(s <= nscreens, 0); _cont(s++)) \
-		for((a)=(s < nscreens ? (v)->areas[s] : v->floating), __anext=(a)->next; _cond(a, 1); _cont(((a)=__anext) && (__anext=(a)->next)))
+	with(int, __alive)				\
+	with(Area*, __anext)				\
+	for(s=0; _cond(s <= nscreens, 0); _cont(s++))	\
+		for((a)=(s < nscreens ? (v)->areas[s] : v->floating), __anext=((a)?(a)->next:NULL); \
+		    _cond(a, 1);			\
+		    _cont(((a)=__anext) && (__anext=(a)->next)))
 
 #define foreach_column(v, s, a) \
-	with(int, __alive)                           \
-	with(Area*, __anext)                         \
-	for(s=0; _cond(s < nscreens, 0); _cont(s++)) \
-		for((a)=(v)->areas[s], __anext=(a)->next; _cond(a, 1); _cont(((a)=__anext) && (__anext=(a)->next)))
+	with(int, __alive)				\
+	with(Area*, __anext)				\
+	for(s=0; _cond(s < nscreens, 0); _cont(s++))	\
+		for((a)=(v)->areas[s], __anext=((a)?(a)->next:NULL);	\
+		    _cond(a, 1);				\
+		    _cont(((a)=__anext) && (__anext=(a)->next)))
 
 #define foreach_frame(v, s, a, f) \
 	with(Frame*, __fnext)     \
 	foreach_area(v, s, a)     \
-		for((void)(((f)=(a)->frame) && (__fnext=(f)->anext)); _cond(f, 2); _cont(((f)=__fnext) && (__fnext=(f)->anext)))
+		for((void)(((f)=(a)->frame) && (__fnext=(f)?((f)->anext):NULL));	\
+		    _cond(f, 2);					\
+		    _cont(((f)=__fnext) && (__fnext=(f)->anext)))
 
 #define btassert(arg, cond) \
 	(cond ? fprint(1, __FILE__":%d: failed assertion: " #cond "\n", __LINE__), backtrace(arg), true : false)
@@ -61,15 +69,13 @@ void	bar_destroy(Bar**, Bar*);
 void	bar_draw(WMScreen*);
 Bar*	bar_find(Bar*, const char*);
 void	bar_init(WMScreen*);
-void	bar_load(Bar*);
 void	bar_resize(WMScreen*);
 void	bar_sety(WMScreen*, int);
 void	bar_setbounds(WMScreen*, int, int);
 
 /* client.c */
 int	Cfmt(Fmt *f);
-void	apply_rules(Client*);
-void	apply_tags(Client*, const char*);
+bool	client_applytags(Client*, const char*);
 void	client_configure(Client*);
 Client*	client_create(XWindow, XWindowAttributes*);
 void	client_destroy(Client*);
@@ -81,21 +87,22 @@ void	client_kill(Client*, bool);
 void	client_manage(Client*);
 void	client_map(Client*);
 void	client_message(Client*, char*, long);
-void	client_prop(Client*, Atom);
-void	client_reparent(Client*, Window*, Point);
+bool	client_prop(Client*, Atom);
+void	client_reparent(Client*);
 void	client_resize(Client*, Rectangle);
 void	client_setcursor(Client*, Cursor);
 void	client_seturgent(Client*, int, int);
 void	client_setviews(Client*, char**);
 void	client_unmap(Client*, int state);
 Frame*	client_viewframe(Client *c, View *v);
-char*	clientname(Client*);
-void	focus(Client*, bool restack);
+void	focus(Client*, bool user);
 void	fullscreen(Client*, int, long);
+void	group_init(Client*);
 Client*	group_leader(Group*);
-int	map_frame(Client*);
+void	group_remove(Client*);
+int	client_mapframe(Client*);
 Client*	selclient(void);
-int	unmap_frame(Client*);
+int	client_unmapframe(Client*);
 void	update_class(Client*);
 Client*	win2client(XWindow);
 Rectangle	client_grav(Client*, Rectangle);
@@ -106,6 +113,7 @@ char*	column_getmode(Area*);
 void	column_arrange(Area*, bool dirty);
 void	column_attach(Area*, Frame*);
 void	column_attachrect(Area*, Frame*, Rectangle);
+void	column_destroy(Area*);
 void	column_detach(Frame*);
 void	column_frob(Area*);
 void	column_insert(Area*, Frame*, Frame*);
@@ -118,29 +126,29 @@ void	column_settle(Area*);
 void	div_draw(Divide*);
 void	div_set(Divide*, int x);
 void	div_update_all(void);
-bool	find(Area**, Frame**, int, bool, bool);
-int	stack_count(Frame*, int*);
-Frame*	stack_find(Area*, Frame*, int, bool);
+
+/* error.c */
+#define waserror() setjmp(*pusherror())
+void	error(char*, ...);
+void	nexterror(void);
+void	poperror(void);
+jmp_buf*	pusherror(void);
 
 /* event.c */
-void	check_x_event(IxpConn*);
-void	dispatch_event(XEvent*);
-uint	flushenterevents(void);
-uint	flushevents(long, bool dispatch);
+void	debug_event(XEvent*);
 void	print_focus(const char*, Client*, const char*);
-void	xtime_kludge(void);
 
 /* ewmh.c */
-int	ewmh_clientmessage(XClientMessageEvent*);
+void	ewmh_checkresponsive(Client*);
 void	ewmh_destroyclient(Client*);
 void	ewmh_framesize(Client*);
 void	ewmh_getstrut(Client*);
 void	ewmh_getwintype(Client*);
 void	ewmh_init(void);
 void	ewmh_initclient(Client*);
-void	ewmh_pingclient(Client*);
-int	ewmh_prop(Client*, Atom);
+bool	ewmh_prop(Client*, Atom);
 long	ewmh_protocols(Window*);
+bool	ewmh_responsive_p(Client*);
 void	ewmh_updateclient(Client*);
 void	ewmh_updateclientlist(void);
 void	ewmh_updateclients(void);
@@ -182,7 +190,7 @@ void	fs_attach(Ixp9Req*);
 void	fs_clunk(Ixp9Req*);
 void	fs_create(Ixp9Req*);
 void	fs_flush(Ixp9Req*);
-void	fs_freefid(Fid*);
+void	fs_freefid(IxpFid*);
 void	fs_open(Ixp9Req*);
 void	fs_read(Ixp9Req*);
 void	fs_remove(Ixp9Req*);
@@ -190,15 +198,6 @@ void	fs_stat(Ixp9Req*);
 void	fs_walk(Ixp9Req*);
 void	fs_write(Ixp9Req*);
 void	event(const char*, ...);
-
-/* geom.c */
-Align	get_sticky(Rectangle src, Rectangle dst);
-Cursor	quad_cursor(Align);
-Align	quadrant(Rectangle, Point);
-bool	rect_contains_p(Rectangle, Rectangle);
-bool	rect_haspoint_p(Point, Rectangle);
-bool	rect_intersect_p(Rectangle, Rectangle);
-Rectangle	rect_intersection(Rectangle, Rectangle);
 
 /* key.c */
 void	init_lock_keys(void);
@@ -209,34 +208,24 @@ void	update_keys(void);
 void	init_screens(void);
 void	spawn_command(const char*);
 
-/* map.c */
-void**	hash_get(Map*, const char*, bool create);
-void*	hash_rm(Map*, const char*);
-void**	map_get(Map*, ulong, bool create);
-void*	map_rm(Map*, ulong);
-
 /* message.c */
-bool	getlong(const char*, long*);
-bool	getulong(const char*, ulong*);
+char*	mask(char**, int*, int*);
+char*	message_bar(Bar*, IxpMsg*);
 char*	message_client(Client*, IxpMsg*);
 char*	message_root(void*, IxpMsg*);
 char*	message_view(View*, IxpMsg*);
-char*	msg_debug(IxpMsg*);
-char*	msg_getword(IxpMsg*);
-char*	msg_parsecolors(IxpMsg*, CTuple*);
+void	msg_debug(char*);
+void	msg_eatrunes(IxpMsg*, int (*)(Rune), int);
+char*	msg_getword(IxpMsg*, char*);
+void	msg_parsecolors(IxpMsg*, CTuple*);
 char*	msg_selectarea(Area*, IxpMsg*);
 char*	msg_sendclient(View*, IxpMsg*, bool swap);
+char*	readctl_bar(Bar*);
 char*	readctl_client(Client*);
 char*	readctl_root(void);
 char*	readctl_view(View*);
 Area*	strarea(View*, ulong, const char*);
 void	warning(const char*, ...);
-/* debug */
-void	debug(int, const char*, ...);
-void	dprint(const char*, ...);
-void	dwrite(int, void*, int, bool);
-bool	setdebug(int);
-void	vdebug(int, const char*, va_list);
 
 /* mouse.c */
 Window*	constraintwin(Rectangle);
@@ -253,9 +242,6 @@ Align	snap_rect(const Rectangle *rects, int num, Rectangle *current, Align *mask
 /* print.c */
 int	Ffmt(Fmt*);
 
-/* printevent.c */
-void	printevent(XEvent*);
-
 /* root.c */
 void	root_init(void);
 
@@ -264,8 +250,15 @@ void*	findthing(Rectangle, int, Vector_ptr*, Rectangle(*)(void*), bool);
 int	ownerscreen(Rectangle);
 
 /* rule.c */
-void	trim(char *str, const char *chars);
-void	update_rules(Rule**, const char*);
+void	update_rules(Rule**, char*);
+
+/* stack.c */
+bool	find(Area* *, Frame**, int, bool, bool);
+int	stack_count(Frame*, int*);
+Frame*	stack_find(Area*, Frame*, int, bool);
+void	stack_info(Frame*, Frame**, Frame**, int*, int*);
+void	stack_scale(Frame*, int);
+
 
 /* view.c */
 void	view_arrange(View*);
@@ -279,7 +272,7 @@ bool	view_fullscreen_p(View*, int);
 char*	view_index(View*);
 void	view_init(View*, int iscreen);
 char**	view_names(void);
-uint	view_newcolwidth(View*, int i);
+uint	view_newcolwidth(View*, int, int);
 void	view_restack(View*);
 void	view_scale(View*, int, int);
 Client*	view_selclient(View*);
@@ -287,36 +280,13 @@ void	view_select(const char*);
 void	view_update(View*);
 void	view_update_all(void);
 void	view_update_rect(View*);
+void	view_update_urgency(View*, char*);
 Rectangle*	view_rects(View*, uint *num, Frame *ignore);
-
-/* _util.c */
-void	backtrace(char*);
-void	closeexec(int);
-char**	comm(int, char**, char**);
-int	doublefork(void);
-void	grep(char**, Reprog*, int);
-char*	join(char**, char*);
-char*	pathsearch(const char*, const char*, bool);
-void	refree(Regex*);
-void	reinit(Regex*, char*);
-int	strlcatprint(char*, int, const char*, ...);
-int	spawn3(int[3], const char*, char*[]);
-int	spawn3l(int[3], const char*, ...);
-void	uniq(char**);
-int	unquote(char*, char*[], int);
 
 /* utf.c */
 char*	toutf8(const char*);
 char*	toutf8n(const char*, size_t);
 
 /* xdnd.c */
-int	xdnd_clientmessage(XClientMessageEvent*);
 void	xdnd_initwindow(Window*);
-
-/* xext.c */
-void	randr_event(XEvent*);
-bool	render_argb_p(Visual*);
-void	xext_event(XEvent*);
-void	xext_init(void);
-Rectangle*	xinerama_screens(int*);
 

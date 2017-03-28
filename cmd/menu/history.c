@@ -8,7 +8,7 @@
 
 static void
 splice(Item *i) {
-	if(i->next != nil) 
+	if(i->next != nil)
 		i->next->prev = i->prev;
 	if(i->prev != nil)
 		i->prev->next = i->next;
@@ -19,25 +19,25 @@ history_search(int dir, char *string, int n) {
 	Item *i;
 
 	if(dir == FORWARD) {
-		if(histidx == &hist)
+		if(histsel == &hist)
 			return hist.string;
-		for(i=histidx->next; i != hist.next; i=i->next)
+		for(i=histsel->next; i != hist.next; i=i->next)
 			if(!i->string || !compare(i->string, string, n)) {
-				histidx = i;
+				histsel = i;
 				return i->string;
 			}
 		return string;
 	}
 	assert(dir == BACKWARD);
 
-	if(histidx == &hist) {
+	if(histsel == &hist) {
 		free(hist.string);
 		hist.string = estrdup(input.string);
 	}
 
-	for(i=histidx->prev; i != &hist; i=i->prev)
+	for(i=histsel->prev; i != &hist; i=i->prev)
 		if(!compare(i->string, string, n)) {
-			histidx = i;
+			histsel = i;
 			return i->string;
 		}
 	return string;
@@ -59,7 +59,7 @@ history_dump(const char *path, int max) {
 	fd = mkstemp(tmp);
 	if(fd < 0) {
 		fprint(2, "%s: Can't create temporary history file %q: %r\n", argv0, path);
-		return;
+		_exit(1);
 	}
 
 	hist.string = input.string;
@@ -82,9 +82,13 @@ history_dump(const char *path, int max) {
 	Binit(&b, fd, OWRITE);
 	hist.next = nil;
 	for(h=first; h; h=h->next)
-		Bprint(&b, "%s\n", h->string);
+		if(Bprint(&b, "%s\n", h->string) < 0) {
+			unlink(tmp);
+			fprint(2, "%s: Can't write temporary history file %q: %r\n", argv0, path);
+			_exit(1);
+		}
 	Bterm(&b);
 	rename(tmp, path);
-	exit(0);
+	_exit(0);
 }
 

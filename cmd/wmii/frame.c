@@ -1,4 +1,4 @@
-/* Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+/* Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #include "dat.h"
@@ -29,6 +29,9 @@ frame_create(Client *c, View *v) {
 	if(c->sel) {
 		f->floatr = c->sel->floatr;
 		f->r = c->sel->r;
+	}else if(c->sel) {
+		f->floatr = c->frame->floatr;
+		f->r = c->frame->r;
 	}else {
 		f->r = client_grav(c, c->r);
 		f->floatr = f->r;
@@ -93,23 +96,13 @@ frame_insert(Frame *f, Frame *pos) {
 
 bool
 frame_restack(Frame *f, Frame *above) {
-	Client *c;
-	Frame *fp;
 	Area *a;
 
-	c = f->client;
 	a = f->area;
 	if(!a->floating)
 		return false;
 	if(f == above)
 		return false;
-
-	if(above == nil && !(c->w.ewmh.type & TypeDock))
-		for(fp=a->stack; fp; fp=fp->snext)
-			if(fp->client->w.ewmh.type & TypeDock)
-				above = fp;
-			else
-				break;
 
 	if(f->sprev || f == a->stack)
 	if(f->sprev == above)
@@ -139,21 +132,23 @@ frame_restack(Frame *f, Frame *above) {
 }
 
 /* Handlers */
-static void
-bup_event(Window *w, XButtonEvent *e) {
+static bool
+bup_event(Window *w, void *aux, XButtonEvent *e) {
 	if((e->state & def.mod) != def.mod)
 		XAllowEvents(display, ReplayPointer, e->time);
 	else
 		XUngrabPointer(display, e->time);
-	event("ClientClick %C %d\n", w->aux, e->button);
+	if(!e->subwindow)
+		event("ClientClick %#C %d\n", aux, e->button);
+	return false;
 }
 
-static void
-bdown_event(Window *w, XButtonEvent *e) {
+static bool
+bdown_event(Window *w, void *aux, XButtonEvent *e) {
 	Frame *f;
 	Client *c;
 
-	c = w->aux;
+	c = aux;
 	f = c->sel;
 
 	if((e->state & def.mod) == def.mod) {
@@ -194,62 +189,56 @@ bdown_event(Window *w, XButtonEvent *e) {
 			XUngrabPointer(display, e->time);
 			sync();
 
-			event("ClientMouseDown %C %d\n", f->client, e->button);
+			event("ClientMouseDown %#C %d\n", f->client, e->button);
 		}
 	}
+	return false;
 }
 
-static void
-config_event(Window *w, XConfigureEvent *e) {
-
-	USED(w, e);
-}
-
-static void
-enter_event(Window *w, XCrossingEvent *e) {
+static bool
+enter_event(Window *w, void *aux, XCrossingEvent *e) {
 	Client *c;
 	Frame *f;
 
-	c = w->aux;
+	c = aux;
 	f = c->sel;
 	if(disp.focus != c || selclient() != c) {
-		Dprint(DFocus, "enter_notify(f) => [%C]%s%s\n",
+		Dprint(DFocus, "%E\n", e);
+		Dprint(DFocus, "enter_notify(f) => [%#C]%s%s\n",
 		       f->client, f->client->name,
-		       ignoreenter == e->serial ? " (ignored)" : "");
+		       e->serial <= event_lastconfigure ? " (ignored)" : "");
 		if(e->detail != NotifyInferior)
-		if(e->serial != ignoreenter && (f->area->floating || !f->collapsed))
-		if(!(c->w.ewmh.type & TypeSplash))
+		if(e->serial > event_lastconfigure && !f->collapsed)
 			focus(f->client, false);
 	}
 	mouse_checkresize(f, Pt(e->x, e->y), false);
+	return false;
 }
 
-static void
-expose_event(Window *w, XExposeEvent *e) {
+static bool
+expose_event(Window *w, void *aux, XExposeEvent *e) {
 	Client *c;
 
 	USED(e);
 
-	c = w->aux;
+	c = aux;
 	if(c->sel)
 		frame_draw(c->sel);
-	else
-		fprint(2, "Badness: Expose event on a client frame which shouldn't be visible: %C\n",
-			c);
+	return false;
 }
 
-static void
-motion_event(Window *w, XMotionEvent *e) {
+static bool
+motion_event(Window *w, void *aux, XMotionEvent *e) {
 	Client *c;
-	
-	c = w->aux;
+
+	c = aux;
 	mouse_checkresize(c->sel, Pt(e->x, e->y), false);
+	return false;
 }
 
 Handlers framehandler = {
 	.bup = bup_event,
 	.bdown = bdown_event,
-	.config = config_event,
 	.enter = enter_event,
 	.expose = expose_event,
 	.motion = motion_event,
@@ -268,9 +257,8 @@ frame_gethints(Frame *f) {
 	c = f->client;
 	h = *c->w.hints;
 
-	r = frame_rect2client(c, f->r, f->area->floating);
-	d.x = Dx(f->r) - Dx(r);
-	d.y = Dy(f->r) - Dy(r);
+	r = frame_client2rect(c, ZR, f->area->floating);
+	d = subpt(r.max, r.min);
 
 	if(!f->area->floating && def.incmode == IIgnore)
 		h.inc = Pt(1, 1);
@@ -283,10 +271,8 @@ frame_gethints(Frame *f) {
 	h.min.x += d.x;
 	h.min.y += d.y;
 	/* Guard against overflow. */
-	if(h.max.x + d.x > h.max.x)
-		h.max.x += d.x;
-	if(h.max.y + d.y > h.max.y)
-		h.max.y += d.y;
+	h.max.x = max(h.max.x + d.x, h.max.x);
+	h.max.y = max(h.max.y + d.y, h.max.y);
 
 	h.base.x += d.x;
 	h.base.y += d.y;
@@ -350,8 +336,8 @@ frame_resize(Frame *f, Rectangle r) {
 		           || Dy(r) == 0 && (!f->area->max || resizing)
 			      && !f->collapsed)) {
 		fprint(2, "Frame rect: %R\n", r);
-		r.max.x = min(r.min.x+1, r.max.x);
-		r.max.y = min(r.min.y+1, r.max.y);
+		r.max.x = max(r.min.x+1, r.max.x);
+		r.max.y = max(r.min.y+1, r.max.y);
 	}
 
 	c = f->client;
@@ -410,14 +396,16 @@ pushlabel(Image *img, Rectangle *rp, char *s, CTuple *col) {
 	w = min(w, Dx(*rp) - 30); /* Magic number. */
 	if(w > 0) {
 		r = *rp;
+		r.min.x = r.max.x - w;
 		rp->max.x -= w;
 		if(0)
 		drawline(img, Pt(rp->max.x, r.min.y+2),
 			      Pt(rp->max.x, r.max.y-2),
-			      CapButt, 1, col->border);
+			      CapButt, 1, &col->border);
 		drawstring(img, def.font, r, East,
-			   s, col->fg);
+			   s, &col->fg);
 	}
+	free(s);
 }
 
 void
@@ -427,94 +415,85 @@ frame_draw(Frame *f) {
 	CTuple *col;
 	Image *img;
 	char *s;
-	uint w;
 	int n, m;
 
-	if(f->view != selview)
-		return;
-	if(f->area == nil) /* Blech. */
+	if(f == nil || f->view != selview || f->area == nil)
 		return;
 
 	c = f->client;
-	img = *c->ibuf;
+	img = c->framewin->depth == 32 ? disp.ibuf32 : disp.ibuf;
 	fr = rectsetorigin(c->framewin->r, ZP);
 
 	/* Pick colors. */
-	if(c == selclient() || c == disp.focus)
+	if((c == selclient() || c == disp.focus) && disp.sel)
 		col = &def.focuscolor;
 	else
 		col = &def.normcolor;
 
 	/* Background/border */
 	r = fr;
-	fill(img, r, col->bg);
-	border(img, r, 1, col->border);
+	fill(img, r, &col->bg);
+	border(img, r, 1, &col->border);
 
 	/* Title border */
 	r.max.y = r.min.y + labelh(def.font);
-	border(img, r, 1, col->border);
+	border(img, r, 1, &col->border);
 
 	f->titlebar = insetrect(r, 3);
 	f->titlebar.max.y += 3;
 
+	f->grabbox = insetrect(r, 2);
+	f->grabbox.max.x = f->grabbox.min.x + Dy(f->grabbox);
+
 	/* Odd focus. Unselected, with keyboard focus. */
 	/* Draw a border just inside the titlebar. */
 	if(c != selclient() && c == disp.focus) {
-		border(img, insetrect(r, 1), 1, def.normcolor.bg);
-		border(img, insetrect(r, 2), 1, def.focuscolor.border);
+		border(img, insetrect(r, 1), 1, &def.normcolor.bg);
+		border(img, insetrect(r, 2), 1, &def.focuscolor.border);
 	}
 
-	/* grabbox */
-	r.min = Pt(2, 2);
-	r.max.y -= 2;
-	r.max.x = r.min.x + Dy(r);
-	f->grabbox = r;
-
 	if(c->urgent)
-		fill(img, r, col->fg);
-	border(img, r, 1, col->border);
+		fill(img, f->grabbox, &col->fg);
+	border(img, f->grabbox, 1, &col->border);
 
 	/* Odd focus. Selected, without keyboard focus. */
 	/* Draw a border around the grabbox. */
 	if(c != disp.focus && col == &def.focuscolor)
-		border(img, insetrect(r, -1), 1, def.normcolor.bg);
+		border(img, insetrect(r, -1), 1, &def.normcolor.bg);
 
 	/* Draw a border on borderless+titleless selected apps. */
-	if(f->area->floating && c->borderless && c->titleless && !c->fullscreen && c == selclient())
-		setborder(c->framewin, def.border, def.focuscolor.border);
+	if(c->borderless && c->titleless && f->area->floating && !c->fullscreen && c == selclient())
+		setborder(c->framewin, def.border, &def.focuscolor.border);
 	else
-		setborder(c->framewin, 0, def.focuscolor.border);
+		setborder(c->framewin, 0, &def.focuscolor.border);
 
 	/* Label */
-	r.min.x = r.max.x;
-	r.max.x = fr.max.x;
-	r.min.y = 0;
-	r.max.y = labelh(def.font);
+	r = Rect(f->grabbox.max.x, 0, fr.max.x, labelh(def.font));
+
 	/* Draw count on frames in 'max' columns. */
 	if(f->area->max && !resizing) {
-		/* XXX */
 		n = stack_count(f, &m);
-		s = smprint("%d/%d", m, n);
-		pushlabel(img, &r, s, col);
-		free(s);
+		pushlabel(img, &r, smprint("%d/%d", m, n), col);
 	}
+
 	/* Label clients with extra tags. */
-	if((s = client_extratags(c))) {
+	if((s = client_extratags(c)))
 		pushlabel(img, &r, s, col);
-		free(s);
-	}else /* Make sure floating clients have room for their indicators. */
-	if(c->floating)
-		r.max.x -= Dx(f->grabbox);
-	w = drawstring(img, def.font, r, West,
-			c->name, col->fg);
+
+	if(f->area->floating)  /* Make sure floating clients have room for their indicators. */
+		r.max.x -= f->grabbox.max.x;
+
+	if(!ewmh_responsive_p(c))
+		r.min.x += drawstring(img, def.font, r, West, "(wedged) ", &col->fg);
+	r.min.x += drawstring(img, def.font, r, West, c->name, &col->fg);
 
 	/* Draw inner border on floating clients. */
 	if(f->area->floating) {
-		r.min.x = r.min.x + w + 10;
-		r.max.x += Dx(f->grabbox) - 2;
+		r.min.x += 10;
+		r.max.x += Dx(f->grabbox);
 		r.min.y = f->grabbox.min.y;
 		r.max.y = f->grabbox.max.y;
-		border(img, r, 1, col->border);
+		border(img, r, 1, &col->border);
 	}
 
 	/* Border increment gaps... */
@@ -522,7 +501,7 @@ frame_draw(Frame *f) {
 	r.min.x = max(1, f->crect.min.x - 1);
 	r.max.x = min(fr.max.x - 1, f->crect.max.x + 1);
 	r.max.y = min(fr.max.y - 1, f->crect.max.y + 1);
-	border(img, r, 1, col->border);
+	border(img, r, 1, &col->border);
 
 	/* Why? Because some non-ICCCM-compliant apps feel the need to
 	 * change the background properties of all of their ancestor windows
@@ -606,7 +585,9 @@ frame_focus(Frame *f) {
 		/* XXX */
 		f->colr.max.y = f->colr.min.y + Dy(ff->colr);
 		ff->colr.max.y = ff->colr.min.y + labelh(def.font);
-	}else if(f->area->mode == Coldefault) {
+	}
+	else if(f->area->mode == Coldefault) {
+		/* XXX */
 		for(; f->collapsed && f->anext; f=f->anext)
 			;
 		for(; f->collapsed && f->aprev; f=f->aprev)
@@ -621,18 +602,20 @@ frame_focus(Frame *f) {
 	if(old_a != v->oldsel && f != old_f)
 		v->oldsel = nil;
 
-	if(v != selview || a != v->sel)
-		return;
+	if(f->area->floating)
+		f->collapsed = false;
 
-	move_focus(old_f, f);
-	if(a->floating)
-		float_arrange(a);
-	client_focus(f->client);
+	if(v == selview && a == v->sel && !resizing) {
+		move_focus(old_f, f);
+		if(a->floating)
+			float_arrange(a);
 
-	/*
-	if(!a->floating && ((a->mode == Colstack) || (a->mode == Colmax)))
-	*/
-		column_arrange(a, false);
+		// if(!a->floating && ((a->mode == Colstack) || (a->mode == Colmax)))
+		if(true)
+			column_arrange(a, false);
+
+		client_focus(f->client);
+	}
 }
 
 int
@@ -650,7 +633,7 @@ constrain(Rectangle r, int inset) {
 
 	if(inset < 0)
 		inset = Dy(screen->brect);
-	/* 
+	/*
 	 * FIXME: This will cause problems for windows with
 	 * D(r) < 2 * inset
 	 */
@@ -658,15 +641,18 @@ constrain(Rectangle r, int inset) {
 	SET(best);
 	sbest = nil;
 	for(sp=screens; (s = *sp); sp++) {
-		if (!screen->showing)
+		if(!screen->showing)
 			continue;
+
 		isect = rect_intersection(r, insetrect(s->r, inset));
 		if(Dx(isect) >= 0 && Dy(isect) >= 0)
 			return r;
+
 		if(Dx(isect) <= 0 && Dy(isect) <= 0)
 			n = max(Dx(isect), Dy(isect));
 		else
 			n = min(Dx(isect), Dy(isect));
+
 		if(!sbest || n > best) {
 			sbest = s;
 			best = n;

@@ -1,11 +1,10 @@
-/* Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+/* Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #include "dat.h"
 #include <ctype.h>
 #include <stdarg.h>
 #include <time.h>
-#include <unistd.h>
 #include "fns.h"
 
 typedef union IxpFileIdU IxpFileIdU;
@@ -44,7 +43,7 @@ enum {	/* Dirs */
 	FsFEvent,
 	FsFKeys,
 	FsFRctl,
-	FsFTagRules,
+	FsFRules,
 	FsFTctl,
 	FsFTindex,
 	FsFprops,
@@ -90,7 +89,7 @@ dirtab_root[]=	 {{".",		QTDIR,		FsRoot,		0500|DMDIR },
 		  {"colrules",	QTFILE,		FsFColRules,	0600 },
 		  {"event",	QTFILE,		FsFEvent,	0600 },
 		  {"keys",	QTFILE,		FsFKeys,	0600 },
-		  {"tagrules",	QTFILE,		FsFTagRules,	0600 },
+		  {"rules",	QTFILE,		FsFRules,	0600 },
 		  {nil}},
 dirtab_clients[]={{".",		QTDIR,		FsDClients,	0500|DMDIR },
 		  {"",		QTDIR,		FsDClient,	0500|DMDIR },
@@ -124,6 +123,28 @@ static IxpDirtab* dirtab[] = {
 	[FsDTag] = dirtab_tag,
 };
 typedef char* (*MsgFunc)(void*, IxpMsg*);
+typedef char* (*BufFunc)(void*);
+
+typedef struct ActionTab ActionTab;
+static struct ActionTab {
+	MsgFunc		msg;
+	BufFunc		read;
+	size_t		buffer;
+	size_t		size;
+	int		max;
+} actiontab[] = {
+	[FsFBar]      = { .msg = (MsgFunc)message_bar,          .read = (BufFunc)readctl_bar },
+	[FsFCctl]     = { .msg = (MsgFunc)message_client,     	.read = (BufFunc)readctl_client },
+	[FsFRctl]     = { .msg = (MsgFunc)message_root,       	.read = (BufFunc)readctl_root },
+	[FsFTctl]     = { .msg = (MsgFunc)message_view,       	.read = (BufFunc)readctl_view },
+	[FsFTindex]   = { .msg = (MsgFunc)0,		    	.read = (BufFunc)view_index },
+	[FsFColRules] = { .buffer = offsetof(Ruleset, string),	.size = offsetof(Ruleset, size) },
+	[FsFKeys]     = { .buffer = offsetof(Defs, keys),	.size = offsetof(Defs, keyssz) },
+	[FsFRules]    = { .buffer = offsetof(Ruleset, string), 	.size = offsetof(Ruleset, size) },
+	[FsFClabel]   = { .buffer = offsetof(Client, name),	.max = sizeof ((Client*)0)->name },
+	[FsFCtags]    = { .buffer = offsetof(Client, tags),   	.max = sizeof ((Client*)0)->tags },
+	[FsFprops]    = { .buffer = offsetof(Client, props),  	.max = sizeof ((Client*)0)->props },
+};
 
 void
 event(const char *format, ...) {
@@ -134,6 +155,7 @@ event(const char *format, ...) {
 	va_end(ap);
 
 	ixp_pending_write(&events, buffer, strlen(buffer));
+	Dprint(DEvents, "%s", buffer);
 }
 
 static int dflags;
@@ -169,15 +191,6 @@ debug(int flag, const char *fmt, ...) {
 }
 
 void
-dprint(const char *fmt, ...) {
-	va_list ap;
-
-	va_start(ap, fmt);
-	vdebug(0, fmt, ap);
-	va_end(ap);
-}
-
-void
 dwrite(int flag, void *buf, int n, bool always) {
 	int i;
 
@@ -196,7 +209,7 @@ dwrite(int flag, void *buf, int n, bool always) {
 static uint	fs_size(IxpFileId*);
 
 static void
-dostat(Stat *s, IxpFileId *f) {
+dostat(IxpStat *s, IxpFileId *f) {
 	s->type = 0;
 	s->dev = 0;
 	s->qid.path = QID(f->tab.type, f->id);
@@ -212,7 +225,7 @@ dostat(Stat *s, IxpFileId *f) {
 	s->muid = user;
 }
 
-/* 
+/*
  * All lookups and directory organization should be performed through
  * lookup_file, mostly through the dirtab[] tree.
  */
@@ -234,8 +247,10 @@ lookup_file(IxpFileId *parent, char *name)
 	last = &ret;
 	ret = nil;
 	for(; dir->name; dir++) {
-#		define push_file(nam)             \
+#               define push_file(nam, id_, vol)   \
 			file = ixp_srv_getfile(); \
+			file->id = id_;           \
+			file->volatil = vol;      \
 			*last = file;             \
 			last = &file->next;       \
 			file->tab = *dir;         \
@@ -246,10 +261,8 @@ lookup_file(IxpFileId *parent, char *name)
 			case FsDClients:
 				if(!name || !strcmp(name, "sel")) {
 					if((c = selclient())) {
-						push_file("sel");
-						file->volatil = true;
+						push_file("sel", c->w.xid, true);
 						file->p.client = c;
-						file->id = c->w.xid;
 						file->index = c->w.xid;
 					}
 					if(name)
@@ -263,10 +276,8 @@ lookup_file(IxpFileId *parent, char *name)
 				}
 				for(c=client; c; c=c->next) {
 					if(!name || c->w.xid == id) {
-						push_file(sxprint("%C", c));
-						file->volatil = true;
+						push_file(sxprint("%#C", c), c->w.xid, true);
 						file->p.client = c;
-						file->id = c->w.xid;
 						file->index = c->w.xid;
 						assert(file->tab.name);
 						if(name)
@@ -277,8 +288,7 @@ lookup_file(IxpFileId *parent, char *name)
 			case FsDDebug:
 				for(i=0; i < nelem(pdebug); i++)
 					if(!name || !strcmp(name, debugtab[i])) {
-						push_file(debugtab[i]);
-						file->id = i;
+						push_file(debugtab[i], i, false);
 						if(name)
 							goto LastItem;
 					}
@@ -286,20 +296,16 @@ lookup_file(IxpFileId *parent, char *name)
 			case FsDTags:
 				if(!name || !strcmp(name, "sel")) {
 					if(selview) {
-						push_file("sel");
-						file->volatil = true;
+						push_file("sel", selview->id, true);
 						file->p.view = selview;
-						file->id = selview->id;
 					}
 					if(name)
 						goto LastItem;
 				}
 				for(v=view; v; v=v->next) {
 					if(!name || !strcmp(name, v->name)) {
-						push_file(v->name);
-						file->volatil = true;
+						push_file(v->name, v->id, true);
 						file->p.view = v;
-						file->id = v->id;
 						if(name)
 							goto LastItem;
 					}
@@ -308,10 +314,8 @@ lookup_file(IxpFileId *parent, char *name)
 			case FsDBars:
 				for(b=*parent->p.bar_p; b; b=b->next) {
 					if(!name || !strcmp(name, b->name)) {
-						push_file(b->name);
-						file->volatil = true;
+						push_file(b->name, b->id, true);
 						file->p.bar = b;
-						file->id = b->id;
 						if(name)
 							goto LastItem;
 					}
@@ -320,8 +324,7 @@ lookup_file(IxpFileId *parent, char *name)
 			}
 		}else /* Static dirs */
 		if(!name && !(dir->flags & FLHide) || name && !strcmp(name, dir->name)) {
-			push_file(file->tab.name);
-			file->id = 0;
+			push_file(file->tab.name, 0, false);
 			file->p.ref = parent->p.ref;
 			file->index = parent->index;
 			/* Special considerations: */
@@ -336,8 +339,11 @@ lookup_file(IxpFileId *parent, char *name)
 			case FsFColRules:
 				file->p.rule = &def.colrules;
 				break;
-			case FsFTagRules:
-				file->p.rule = &def.tagrules;
+			case FsFKeys:
+				file->p.ref = &def;
+				break;
+			case FsFRules:
+				file->p.rule = &def.rules;
 				break;
 			}
 			if(name)
@@ -364,7 +370,7 @@ fs_attach(Ixp9Req *r) {
 	r->fid->qid.type = f->tab.qtype;
 	r->fid->qid.path = QID(f->tab.type, 0);
 	r->ofcall.rattach.qid = r->fid->qid;
-	respond(r, nil);
+	ixp_respond(r, nil);
 }
 
 void
@@ -375,35 +381,33 @@ fs_walk(Ixp9Req *r) {
 
 static uint
 fs_size(IxpFileId *f) {
-	switch(f->tab.type) {
-	default:
-		return 0;
-	case FsFColRules:
-	case FsFTagRules:
-		return f->p.rule->size;
-	case FsFKeys:
-		return def.keyssz;
-	case FsFCtags:
-		return strlen(f->p.client->tags);
-	case FsFClabel:
-		return strlen(f->p.client->name);
-	case FsFprops:
-		return strlen(f->p.client->props);
-	}
+	ActionTab *t;
+
+	t = &actiontab[f->tab.type];
+	if(f->tab.type < nelem(actiontab))
+		if(t->size)
+			return structmember(f->p.ref, int, t->size);
+		else if(t->buffer && t->max)
+			return strlen(structptr(f->p.ref, char, t->buffer));
+		else if(t->buffer)
+			return strlen(structmember(f->p.ref, char*, t->buffer));
+		else if(t->read)
+			return strlen(t->read(f->p.ref));
+	return 0;
 }
 
 void
 fs_stat(Ixp9Req *r) {
 	IxpMsg m;
-	Stat s;
+	IxpStat s;
 	int size;
 	char *buf;
 	IxpFileId *f;
-	
+
 	f = r->fid->aux;
 
 	if(!ixp_srv_verifyfile(f, lookup_file)) {
-		respond(r, Enofile);
+		ixp_respond(r, Enofile);
 		return;
 	}
 
@@ -416,19 +420,21 @@ fs_stat(Ixp9Req *r) {
 	ixp_pstat(&m, &s);
 
 	r->ofcall.rstat.stat = (uchar*)m.data;
-	respond(r, nil);
+	ixp_respond(r, nil);
 }
 
 void
 fs_read(Ixp9Req *r) {
 	char *buf;
 	IxpFileId *f;
-	int n;
+	ActionTab *t;
+	int n, found;
 
 	f = r->fid->aux;
+	found = 0;
 
 	if(!ixp_srv_verifyfile(f, lookup_file)) {
-		respond(r, Enofile);
+		ixp_respond(r, Enofile);
 		return;
 	}
 
@@ -441,53 +447,26 @@ fs_read(Ixp9Req *r) {
 			ixp_pending_respond(r);
 			return;
 		}
-		switch(f->tab.type) {
-		case FsFprops:
-			ixp_srv_readbuf(r, f->p.client->props, strlen(f->p.client->props));
-			respond(r, nil);
-			return;
-		case FsFColRules:
-		case FsFTagRules:
-			ixp_srv_readbuf(r, f->p.rule->string, f->p.rule->size);
-			respond(r, nil);
-			return;
-		case FsFKeys:
-			ixp_srv_readbuf(r, def.keys, def.keyssz);
-			respond(r, nil);
-			return;
-		case FsFCtags:
-			ixp_srv_readbuf(r, f->p.client->tags, strlen(f->p.client->tags));
-			respond(r, nil);
-			return;
-		case FsFClabel:
-			ixp_srv_readbuf(r, f->p.client->name, strlen(f->p.client->name));
-			respond(r, nil);
-			return;
-		case FsFBar:
-			ixp_srv_readbuf(r, f->p.bar->buf, strlen(f->p.bar->buf));
-			respond(r, nil);
-			return;
-		case FsFRctl:
-			buf = readctl_root();
-			ixp_srv_readbuf(r, buf, strlen(buf));
-			respond(r, nil);
-			return;
-		case FsFCctl:
-			buf = readctl_client(f->p.client);
-			ixp_srv_readbuf(r, buf, strlen(buf));
-			respond(r, nil);
-			return;
-		case FsFTindex:
-			buf = view_index(f->p.view);
-			ixp_srv_readbuf(r, buf, strlen(buf));
-			respond(r, nil);
-			return;
-		case FsFTctl:
-			buf = readctl_view(f->p.view);
-			n = strlen(buf);
+		t = &actiontab[f->tab.type];
+		if(f->tab.type < nelem(actiontab)) {
+			if(t->read)
+				buf = t->read(f->p.ref);
+			else if(t->buffer && t->max)
+				buf = structptr(f->p.ref, char, t->buffer);
+			else if(t->buffer)
+				buf = structmember(f->p.ref, char*, t->buffer);
+			else
+				goto done;
+			n = t->size ? structmember(f->p.ref, int, t->size) : strlen(buf);
 			ixp_srv_readbuf(r, buf, n);
-			respond(r, nil);
-			return;
+			ixp_respond(r, nil);
+			found++;
+		}
+	done:
+		switch(f->tab.type) {
+		default:
+			if(found)
+				return;
 		}
 	}
 	/* This should not be called if the file is not open for reading. */
@@ -496,93 +475,92 @@ fs_read(Ixp9Req *r) {
 
 void
 fs_write(Ixp9Req *r) {
-	MsgFunc mf;
 	IxpFileId *f;
+	ActionTab *t;
 	char *errstr;
-	char *p;
-	uint i;
+	int found;
 
+	found = 0;
+	errstr = nil;
 	if(r->ifcall.io.count == 0) {
-		respond(r, nil);
+		ixp_respond(r, nil);
 		return;
 	}
 	f = r->fid->aux;
 
 	if(!ixp_srv_verifyfile(f, lookup_file)) {
-		respond(r, Enofile);
+		ixp_respond(r, Enofile);
 		return;
 	}
 
 	switch(f->tab.type) {
-	case FsFColRules:
-	case FsFTagRules:
-		ixp_srv_writebuf(r, &f->p.rule->string, &f->p.rule->size, 0);
-		respond(r, nil);
-		return;
-	case FsFKeys:
-		ixp_srv_writebuf(r, &def.keys, &def.keyssz, 0);
-		respond(r, nil);
-		return;
-	case FsFClabel:
+	case FsFCtags:
+		r->ofcall.io.count = r->ifcall.io.count;
 		ixp_srv_data2cstring(r);
-		utfecpy(f->p.client->name,
-			f->p.client->name+sizeof(client->name),
-			r->ifcall.io.data);
+		client_applytags(f->p.client, r->ifcall.io.data);
+		ixp_respond(r, nil);
+		return;
+	}
+
+	if(waserror()) {
+		ixp_respond(r, ixp_errbuf());
+		return;
+	}
+
+	t = &actiontab[f->tab.type];
+	if(f->tab.type < nelem(actiontab)) {
+		if(t->msg) {
+			errstr = ixp_srv_writectl(r, t->msg);
+			r->ofcall.io.count = r->ifcall.io.count;
+		}
+		else if(t->buffer && t->max)
+			ixp_srv_writebuf(r, (char*[]){ structptr(f->p.ref, char, t->buffer) },
+					 t->size ? structptr(f->p.ref, uint, t->size)
+					         : (uint[]){ strlen(structptr(f->p.ref, char, t->buffer)) },
+					 t->max);
+		else if(t->buffer)
+			ixp_srv_writebuf(r, structptr(f->p.ref, char*, t->buffer),
+					 t->size ? structptr(f->p.ref, uint, t->size) : nil,
+					 t->max);
+		else
+			goto done;
+		ixp_respond(r, errstr);
+		found++;
+	}
+done:
+	switch(f->tab.type) {
+	case FsFClabel:
 		frame_draw(f->p.client->sel);
 		update_class(f->p.client);
-		r->ofcall.io.count = r->ifcall.io.count;
-		respond(r, nil);
-		return;
+		break;
 	case FsFCtags:
-		ixp_srv_data2cstring(r);
-		apply_tags(f->p.client, r->ifcall.io.data);
-		r->ofcall.io.count = r->ifcall.io.count;
-		respond(r, nil);
-		return;
-	case FsFBar:
-		i = strlen(f->p.bar->buf);
-		p = f->p.bar->buf;
-		ixp_srv_writebuf(r, &p, &i, 279);
-		bar_load(f->p.bar);
-		r->ofcall.io.count = i - r->ifcall.io.offset;
-		respond(r, nil);
-		return;
-	case FsFCctl:
-		mf = (MsgFunc)message_client;
-		goto msg;
-	case FsFTctl:
-		mf = (MsgFunc)message_view;
-		goto msg;
-	case FsFRctl:
-		mf = (MsgFunc)message_root;
-		goto msg;
-	msg:
-		errstr = ixp_srv_writectl(r, mf);
-		r->ofcall.io.count = r->ifcall.io.count;
-		respond(r, errstr);
-		return;
+		client_applytags(f->p.client, f->p.client->tags);
+		break;
 	case FsFEvent:
 		if(r->ifcall.io.data[r->ifcall.io.count-1] == '\n')
 			event("%.*s", (int)r->ifcall.io.count, r->ifcall.io.data);
 		else
 			event("%.*s\n", (int)r->ifcall.io.count, r->ifcall.io.data);
 		r->ofcall.io.count = r->ifcall.io.count;
-		respond(r, nil);
-		return;
+		ixp_respond(r, nil);
+		break;
+	default:
+		/* This should not be called if the file is not open for writing. */
+		if(!found)
+			die("Write called on an unwritable file");
 	}
-	/*
-	/* This should not be called if the file is not open for writing. */
-	die("Write called on an unwritable file");
+	poperror();
+	return;
 }
 
 void
 fs_open(Ixp9Req *r) {
 	IxpFileId *f;
-	
+
 	f = r->fid->aux;
 
 	if(!ixp_srv_verifyfile(f, lookup_file)) {
-		respond(r, Enofile);
+		ixp_respond(r, Enofile);
 		return;
 	}
 
@@ -600,37 +578,37 @@ fs_open(Ixp9Req *r) {
 	|| (r->ifcall.topen.mode&3) != OREAD && !(f->tab.perm & 0200)
 	|| (r->ifcall.topen.mode&3) != OWRITE && !(f->tab.perm & 0400)
 	|| (r->ifcall.topen.mode & ~(3|OAPPEND|OTRUNC)))
-		respond(r, Enoperm);
+		ixp_respond(r, Enoperm);
 	else
-		respond(r, nil);
+		ixp_respond(r, nil);
 }
 
 void
 fs_create(Ixp9Req *r) {
 	IxpFileId *f;
-	
+
 	f = r->fid->aux;
 
 	switch(f->tab.type) {
 	default:
-		respond(r, Enoperm);
+		ixp_respond(r, Enoperm);
 		return;
 	case FsDBars:
 		if(!strlen(r->ifcall.tcreate.name)) {
-			respond(r, Ebadvalue);
+			ixp_respond(r, Ebadvalue);
 			return;
 		}
 		bar_create(f->p.bar_p, r->ifcall.tcreate.name);
 		f = lookup_file(f, r->ifcall.tcreate.name);
 		if(!f) {
-			respond(r, Enofile);
+			ixp_respond(r, Enofile);
 			return;
 		}
 		r->ofcall.ropen.qid.type = f->tab.qtype;
 		r->ofcall.ropen.qid.path = QID(f->tab.type, f->id);
 		f->next = r->fid->aux;
 		r->fid->aux = f;
-		respond(r, nil);
+		ixp_respond(r, nil);
 		break;
 	}
 }
@@ -639,34 +617,36 @@ void
 fs_remove(Ixp9Req *r) {
 	IxpFileId *f;
 	WMScreen *s;
-	
+
 	f = r->fid->aux;
 	if(!ixp_srv_verifyfile(f, lookup_file)) {
-		respond(r, Enofile);
+		ixp_respond(r, Enofile);
 		return;
 	}
 
-
 	switch(f->tab.type) {
 	default:
-		respond(r, Enoperm);
+		ixp_respond(r, Enoperm);
 		return;
 	case FsFBar:
 		s = f->p.bar->screen;
 		bar_destroy(f->next->p.bar_p, f->p.bar);
 		bar_draw(s);
-		respond(r, nil);
+		break;
+	case FsDClient:
+		client_kill(f->p.client, true);
 		break;
 	}
+	ixp_respond(r, nil);
 }
 
 void
 fs_clunk(Ixp9Req *r) {
 	IxpFileId *f;
-	
+
 	f = r->fid->aux;
 	if(!ixp_srv_verifyfile(f, lookup_file)) {
-		respond(r, nil);
+		ixp_respond(r, nil);
 		return;
 	}
 
@@ -681,21 +661,14 @@ fs_clunk(Ixp9Req *r) {
 
 	switch(f->tab.type) {
 	case FsFColRules:
+	case FsFRules:
 		update_rules(&f->p.rule->rule, f->p.rule->string);
-		break;
-	case FsFTagRules:
-		update_rules(&f->p.rule->rule, f->p.rule->string);
-		/*
-		for(c=client; c; c=c->next)
-			apply_rules(c);
-		view_update_all();
-		*/
 		break;
 	case FsFKeys:
 		update_keys();
 		break;
 	}
-	respond(r, nil);
+	ixp_respond(r, nil);
 }
 
 void
@@ -708,12 +681,12 @@ fs_flush(Ixp9Req *r) {
 	if(f->pending)
 		ixp_pending_flush(r);
 	/* else die() ? */
-	respond(r->oldreq, Einterrupted);
-	respond(r, nil);
+	ixp_respond(r->oldreq, Einterrupted);
+	ixp_respond(r, nil);
 }
 
 void
-fs_freefid(Fid *f) {
+fs_freefid(IxpFid *f) {
 	IxpFileId *id, *tid;
 
 	tid = f->aux;

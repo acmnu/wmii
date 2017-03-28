@@ -1,9 +1,8 @@
-/* Copyright ©2007-2009 Kris Maglione <jg@suckless.org>
+/* Copyright ©2007-2010 Kris Maglione <jg@suckless.org>
  * See LICENSE file for license details.
  */
 
 #define _XOPEN_SOURCE 600
-#define IXP_P9_STRUCTS
 #define IXP_NO_P9_
 #include <assert.h>
 #include <regexp9.h>
@@ -11,25 +10,39 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ixp.h>
-#include <util.h>
+#include <unistd.h>
+#include <limits.h>
 #include <utf.h>
-#include <fmt.h>
-#include <x11.h>
+#include <ixp.h>
+#include <stuff/x.h>
+#include <stuff/util.h>
+#include "debug.h"
 
-#define FONT		"-*-fixed-medium-r-*-*-13-*-*-*-*-*-*-*"
-#define FOCUSCOLORS	"#ffffff #335577 #447799"
-#define NORMCOLORS	"#222222 #eeeeee #666666"
+#define FONT		"fixed"
+#define FOCUSCOLORS	"#000000 #81654f #000000"
+#define NORMCOLORS	"#000000 #c1c48b #81654f"
 
-enum {
-	PingTime = 10000,
+/* From CGO */
+#define assert_equal(x, y) typedef char _##x##_does_not_equal_##y[((x)-(y))*((x)-(y))*-2+1]
+
+enum Barpos {
+	BBottom,
+	BTop,
 };
 
 enum {
-	CLeft = 1<<0,
-	CCenter = 1<<1,
-	CRight = 1<<2,
+	Coldefault, Colstack, Colmax, Collast
 };
+
+enum {
+	CurNormal,
+	CurNECorner, CurNWCorner, CurSECorner, CurSWCorner,
+	CurDHArrow, CurDVArrow, CurMove, CurInput, CurSizing,
+	CurTCross, CurIcon,
+	CurNone,
+	CurLast,
+};
+Cursor	cursor[CurLast];
 
 enum IncMode {
 	IIgnore,
@@ -38,12 +51,33 @@ enum IncMode {
 };
 
 enum {
-	GInvert = 1<<0,
+	PDesktop,
+	PExtents,
+	PMonitors = PExtents + 4,
+	PState = PMonitors + 4,
+	PLast = PState + 3
+};
+
+enum ClientPermission {
+	PermActivate	= 1<<0,
 };
 
 enum {
-	UrgManager,
-	UrgClient,
+	PingTime = 10000,
+	PingPeriod = 4000,
+	PingPartition = 10,
+};
+
+enum Protocols {
+	ProtoDelete	= 1<<0,
+	ProtoTakeFocus	= 1<<1,
+	ProtoPing	= 1<<2,
+};
+
+enum {
+	SourceUnknown,
+	SourceClient,
+	SourcePager
 };
 
 enum EWMHType {
@@ -58,55 +92,33 @@ enum EWMHType {
 };
 
 enum {
-	Coldefault, Colstack, Colmax, Collast
+	UrgManager,
+	UrgClient,
 };
 
 extern char*	modes[];
 
+#define toggle(val, x)	\
+	((val) = ((x) == On     ? true   : \
+		  (x) == Off    ? false  : \
+		  (x) == Toggle ? !(val) : (val)))
 #define TOGGLE(x) \
-	(x == On ? "on" : \
-	 x == Off ? "off" : \
-	 x == Toggle ? "toggle" : \
-	 "<toggle>")
+	((x) == On     ? "on"     : \
+	 (x) == Off    ? "off"    : \
+	 (x) == Toggle ? "toggle" : "<toggle>")
 enum {
+	Never = -1,
 	Off,
 	On,
+	/* Xlib defines this. :( */
+	// Always,
 	Toggle,
 };
 
-enum Barpos {
-	BBottom,
-	BTop,
-};
-
-enum {
-	CurNormal,
-	CurNECorner, CurNWCorner, CurSECorner, CurSWCorner,
-	CurDHArrow, CurDVArrow, CurMove, CurInput, CurSizing,
-	CurTCross, CurIcon,
-	CurNone,
-	CurLast,
-};
+assert_equal(Always, 2);
 
 enum {
 	NCOL = 16,
-};
-
-enum Protocols {
-	ProtoDelete	= 1<<0,
-	ProtoTakeFocus	= 1<<1,
-	ProtoPing	= 1<<2,
-};
-
-enum DebugOpt {
-	D9p	= 1<<0,
-	DDnd	= 1<<1,
-	DEvent	= 1<<2,
-	DEwmh	= 1<<3,
-	DFocus	= 1<<4,
-	DGeneric= 1<<5,
-	DStack  = 1<<6,
-	NDebugOpt = 7,
 };
 
 /* Data Structures */
@@ -117,11 +129,9 @@ typedef struct Divide Divide;
 typedef struct Frame Frame;
 typedef struct Group Group;
 typedef struct Key Key;
-typedef struct Map Map;
-typedef struct MapEnt MapEnt;
-typedef struct Regex Regex;
 typedef struct Rule Rule;
 typedef struct Ruleset Ruleset;
+typedef struct Ruleval Ruleval;
 typedef struct Strut Strut;
 typedef struct View View;
 typedef struct WMScreen WMScreen;
@@ -151,14 +161,9 @@ struct Bar {
 	char	name[256];
 	int	bar;
 	ushort	id;
-	CTuple	col;
+	CTuple	colors;
 	Rectangle	r;
 	WMScreen*	screen;
-};
-
-struct Regex {
-	char*	regex;
-	Reprog*	regc;
 };
 
 struct Client {
@@ -167,28 +172,35 @@ struct Client {
 	Frame*	sel;
 	Window	w;
 	Window*	framewin;
-	Image**	ibuf;
 	XWindow	trans;
 	Regex	tagre;
 	Regex	tagvre;
 	Group*	group;
 	Strut*	strut;
 	Cursor	cursor;
+	Rectangle configr;
 	Rectangle r;
 	char**	retags;
+	char	class[256];
 	char	name[256];
-	char	tags[256];
 	char	props[512];
+	char	tags[256];
+	char	proplen[PLast];
+	long	propcache[PLast];
+	long	permission;
 	long	proto;
-	uint	border;
+	int	border;
+	int	dead;
+	int	floating;
 	int	fullscreen;
-	int	unmapped;
-	char	floating;
-	char	fixedsize;
-	char	urgent;
-	char	borderless;
-	char	titleless;
-	char	noinput;
+	int	pid;
+	bool	borderless;
+	bool	fixedsize;
+	bool	nofocus;
+	bool	noinput;
+	bool	rgba;
+	bool	titleless;
+	bool	urgent;
 };
 
 struct Divide {
@@ -229,7 +241,7 @@ struct Frame {
 struct Group {
 	Group*	next;
 	XWindow	leader;
-	Client	*client;
+	Client*	client;
 	int	ref;
 };
 
@@ -243,22 +255,23 @@ struct Key {
 	KeyCode	key;
 };
 
-struct Map {
-	MapEnt**bucket;
-	uint	nhash;
-};
-
 struct Rule {
-	Rule*	next;
-	Reprog*	regex;
-	char	value[256];
-
+	Rule*		next;
+	Reprog*		regex;
+	char*		value;
+	Ruleval*	values;
 };
 
 struct Ruleset {
 	Rule*	rule;
 	char*	string;
 	uint	size;
+};
+
+struct Ruleval {
+	Ruleval*	next;
+	char*		key;
+	char*		value;
 };
 
 struct Strut {
@@ -282,42 +295,26 @@ struct View {
 	int	selcol;
 	int	selscreen;
 	bool	dead;
+	bool	urgent;
 	Rectangle *r;
 	Rectangle *pad;
 };
-
-/* Yuck. */
-#define VECTOR(type, nam, c) \
-typedef struct Vector_##nam Vector_##nam;      \
-struct Vector_##nam {                          \
-	type*	ary;                           \
-	long	n;                             \
-	long	size;                          \
-};                                             \
-void	vector_##c##free(Vector_##nam*);       \
-void	vector_##c##init(Vector_##nam*);       \
-void	vector_##c##push(Vector_##nam*, type); \
-
-VECTOR(long, long, l)
-VECTOR(Rectangle, rect, r)
-VECTOR(void*, ptr, p)
-#undef  VECTOR
 
 #ifndef EXTERN
 #  define EXTERN extern
 #endif
 
 /* global variables */
-EXTERN struct {
+typedef struct Defs Defs;
+EXTERN struct Defs {
 	CTuple	focuscolor;
 	CTuple	normcolor;
 	Font*	font;
 	char*	keys;
 	uint	keyssz;
-	Ruleset	tagrules;
 	Ruleset	colrules;
-	char	grabmod[5];
-	ulong	mod;
+	Ruleset	rules;
+	long	mod;
 	uint	border;
 	uint	snap;
 	int	colmode;
@@ -328,11 +325,10 @@ enum {
 	BLeft, BRight
 };
 
-#define BLOCK(x) do { x; }while(0)
-
 EXTERN struct WMScreen {
 	Bar*	bar[2];
 	Window*	barwin;
+	bool	barwin_rgba;
 	bool	showing;
 	int	barpos;
 	int	idx;
@@ -350,55 +346,33 @@ EXTERN struct {
 	bool	sel;
 } disp;
 
-EXTERN Client*	client;
-EXTERN View*	view;
-EXTERN View*	selview;
-EXTERN Key*	key;
-EXTERN Divide*	divs;
 EXTERN Client	c_magic;
 EXTERN Client	c_root;
+EXTERN Client*	client;
+EXTERN Divide*	divs;
+EXTERN Key*	key;
+EXTERN View*	selview;
+EXTERN View*	view;
 
 EXTERN Handlers	framehandler;
-
-EXTERN char	buffer[8092];
-EXTERN char*	_buffer;
-static char*	const _buf_end = buffer + sizeof buffer;
-
-#define bufclear() \
-	BLOCK( _buffer = buffer; _buffer[0] = '\0' )
-#define bufprint(...) \
-	_buffer = seprint(_buffer, _buf_end, __VA_ARGS__)
 
 /* IXP */
 EXTERN IxpServer srv;
 EXTERN Ixp9Srv	p9srv;
 
 /* X11 */
-EXTERN uint	valid_mask;
 EXTERN uint	numlock_mask;
-EXTERN Image*	ibuf;
-EXTERN Image*	ibuf32;
-
-EXTERN Cursor	cursor[CurLast];
-
-typedef void (*XHandler)(XEvent*);
-EXTERN XHandler handler[LASTEvent];
+EXTERN uint	valid_mask;
 
 /* Misc */
-EXTERN bool	starting;
-EXTERN bool	resizing;
-EXTERN long	ignoreenter;
-EXTERN char*	user;
 EXTERN char*	execstr;
-EXTERN int	debugflag;
-EXTERN int	debugfile;
-EXTERN long	xtime;
-EXTERN Visual*	render_visual;
+EXTERN char	hostname[HOST_NAME_MAX + 1];
+EXTERN long	ignoreenter;
+EXTERN bool	resizing;
+EXTERN int	starting;
+EXTERN char*	user;
 
 EXTERN Client*	kludge;
 
 extern char*	debugtab[];
-
-#define Debug(x) if(((debugflag|debugfile)&(x)) && setdebug(x))
-#define Dprint(x, ...) BLOCK( if((debugflag|debugfile)&(x)) debug(x, __VA_ARGS__) )
 

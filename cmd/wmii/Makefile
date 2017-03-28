@@ -4,44 +4,40 @@ include $(ROOT)/mk/wmii.mk
 
 main.c: $(ROOT)/mk/wmii.mk
 
-TARG =	wmii
-HFILES=	dat.h fns.h
+TARG     = wmii
+HFILES   = dat.h fns.h
+TAGFILES = dat.h
 
 PACKAGES += $(X11PACKAGES) xext xrandr xrender xinerama
 
-LIB =	$(LIBIXP)
-LIBS += -lm $(LIBS9)
+LIB = $(LIBIXP) $(LIBS9)
+LIBS += -lm
 
-CFLAGS += $(INCICONV) -DIXP_NEEDAPI=97
 OBJ =	area	\
 	bar	\
+	backtrace \
 	client	\
 	column	\
 	div	\
+	error	\
 	event	\
 	ewmh	\
 	float	\
 	frame	\
 	fs	\
-	geom	\
 	key	\
 	layout	\
 	main	\
-	map	\
 	message	\
 	mouse	\
 	print   \
 	root	\
 	rule	\
-	printevent\
 	screen	\
+	stack	\
 	utf	\
-	_util	\
 	view	\
-	xdnd	\
-	x11	\
-	xext	\
-	../util
+	xdnd
 
 include $(ROOT)/mk/one.mk
 

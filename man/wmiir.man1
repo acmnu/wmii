@@ -10,8 +10,8 @@ wmiir - The wmii 9P filesystem client
 
 = SYNOPSIS =
 
-wmiir [-a <address>] {create | ls [-dlp] | read | remove | write} <file> +
-wmiir [-a <address>] xwrite <file> <data> ... +
+wmiir [-a <address>] [-b] {create | ls [-dlp] | read | remove | write} <file> +
+wmiir [-a <address>] [-b] xwrite <file> <data> ... +
 wmiir -v
 
 = DESCRIPTION =
@@ -21,12 +21,24 @@ to its virtual filesystem by default. `wmiir` is most often used to query and
 issue commands to `wmii`, both from the command line and from its `sh`-based
 configuration scripts.
 
+Since the default encoding of 9P filesystems is UTF-8, `wmiir`
+assumes that all data read and written is text data and
+translates to or from your locale character encoding as
+necessary. When working with non-text data in a non-UTF-8
+locale, the _-b_ flag should be specified to disable this
+behavior.
+
 = ARGUMENTS =
 
 : -a
         The address at which to connect to `wmii`.
+: -b
+	With the _-b_ flag, data that you intend to read or
+	write is treated as binary data.
 :
 = COMMANDS =
+
+The following commands deal with 9P filesystems.
 
 : create <file>
         Creates a new file or directory in the filesystem. Permissions and
@@ -53,12 +65,34 @@ configuration scripts.
 : remove <path>
         Removes <path> from the filesystem.
 
-        Synonyms: rm
+        Synonyms: `rm`
 : write <file>
         Writes the contents of the standard input to <file>.
 : xwrite <file> <data> ...
         Writes each argument after <file> to the latter.
 :
+
+Additionally, wmiir provides the following utility commands relevant
+to scripting wmii:
+
+: namespace
+	Prints the current wmii namespace directory, usually
+	equivalent to /tmp/ns.$USER.${DISPLAY%.0}, but possibly
+	different depending on the value of $NAMESPACE and
+	$WMII_NAMESPACE.
+
+	Synonyms: `ns`
+: setsid [-0 <argv0>] [-f] <command>
+	Executes the given command after setting the session id (see
+	setsid(2)). If _-0_ is given, the command is run with the
+	given value as argv[0]. For instance, to run sh as a login
+	shell, one might run
+
+```        wmiir setsid -0 -sh sh
+	If _-f_ is given, wmiir will fork into the background before
+	executing the command.
+: proglist [--] <directory> ...
+	Lists all executable commands in the given directories.
 
 = ENVIRONMENT =
 

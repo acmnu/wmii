@@ -1,5 +1,5 @@
 /* Copyright ©2004-2006 Anselm R. Garbe <garbeam at gmail dot com>
- * Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+ * Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #include "dat.h"
@@ -17,8 +17,8 @@ char *modes[] = {
 
 bool
 column_setmode(Area *a, const char *mode) {
-	char *str, *tok, *orig;
-	char add, old;
+	char *str, *tok;
+	int add, old;
 
 	/*
 	 * The mapping between the current internal
@@ -27,50 +27,36 @@ column_setmode(Area *a, const char *mode) {
 	 * change.
 	 */
 
-	orig = strdup(mode);
-	str = orig;
-	old = '\0';
-	while(*(tok = str)) {
-		add = old;
-		while((old=*str) && !strchr("+-^", old))
-			str++;
-		*str = '\0';
-		if(str > tok) {
-			print("'%s' %c\n", tok, add);
-			if(!strcmp(tok, "max")) {
-				if(add == '\0' || add == '+')
-					a->max = true;
-				else if(add == '-')
-					a->max = false;
-				else
-					a->max = !a->max;
-			}else
-			if(!strcmp(tok, "stack")) {
-				if(add == '\0' || add == '+')
-					a->mode = Colstack;
-				else if(add == '-')
-					a->mode = Coldefault;
-				else
-					a->mode = a->mode == Colstack ? Coldefault : Colstack;
-			}else
-			if(!strcmp(tok, "default")) {
-				if(add == '\0' || add == '+') {
-					a->mode = Coldefault;
-					column_arrange(a, true);
-				}else if(add == '-')
-					a->mode = Colstack;
-				else
-					a->mode = a->mode == Coldefault ? Colstack : Coldefault;
-			}else {
-				free(orig);
-				return false;
-			}
-		}
-		if(old)
-			str++;
-		
+	str = freelater(estrdup(mode));
+	old = '+';
+	while((tok = mask(&str, &add, &old))) {
+		if(!strcmp(tok, "max")) {
+			if(add == '\0' || add == '+')
+				a->max = true;
+			else if(add == '-')
+				a->max = false;
+			else
+				a->max = !a->max;
+		}else
+		if(!strcmp(tok, "stack")) {
+			if(add == '\0' || add == '+')
+				a->mode = Colstack;
+			else if(add == '-')
+				a->mode = Coldefault;
+			else
+				a->mode = a->mode == Colstack ? Coldefault : Colstack;
+		}else
+		if(!strcmp(tok, "default")) {
+			if(add == '\0' || add == '+') {
+				a->mode = Coldefault;
+				column_arrange(a, true);
+			}else if(add == '-')
+				a->mode = Colstack;
+			else
+				a->mode = a->mode == Coldefault ? Colstack : Coldefault;
+		}else
+			return false;
 	}
-	free(orig);
 	return true;
 }
 
@@ -86,6 +72,18 @@ column_minwidth(void)
 	return 4 * labelh(def.font);
 }
 
+static void
+columns_update(View *v) {
+	Area *a;
+	Frame *f;
+	int s;
+
+	foreach_frame(v, s, a, f) {
+		f->screen = s;
+		f->column = area_idx(a);
+	}
+}
+
 Area*
 column_new(View *v, Area *pos, int scrn, uint w) {
 	Area *a;
@@ -98,6 +96,7 @@ column_new(View *v, Area *pos, int scrn, uint w) {
 		return nil;
 
 	view_arrange(v);
+	columns_update(v);
 	view_update(v);
 #endif
 }
@@ -106,7 +105,8 @@ void
 column_insert(Area *a, Frame *f, Frame *pos) {
 
 	f->area = a;
-	f->client->floating = false;
+	if(f->client->floating == On)
+		f->client->floating = Off;
 	f->screen = a->screen;
 	f->column = area_idx(a);
 	frame_insert(f, pos);
@@ -114,140 +114,13 @@ column_insert(Area *a, Frame *f, Frame *pos) {
 		area_setsel(a, f);
 }
 
-/* Temporary. */
-static void
-stack_scale(Frame *first, int height) {
-	Frame *f;
-	Area *a;
-	uint dy;
-	int surplus;
+void
+column_destroy(Area *a) {
+	View *v;
 
-	a = first->area;
-
-	/*
-	 * Will need something like this.
-	column_fit(a, &ncol, &nuncol);
-	*/
-
-	dy = 0;
-	for(f=first; f && !f->collapsed; f=f->anext)
-		dy += Dy(f->colr);
-
-	/* Distribute the surplus.
-	 */
-	surplus = height - dy;
-	for(f=first; f && !f->collapsed; f=f->anext)
-		f->colr.max.y += ((float)Dy(f->r) / dy) * surplus;
-}
-
-static void
-stack_info(Frame *f, Frame **firstp, Frame **lastp, int *dyp, int *nframep) {
-	Frame *ft, *first, *last;
-	int dy, nframe;
-
-	nframe = 0;
-	dy = 0;
-	first = f;
-	last = f;
-
-	for(ft=f; ft && ft->collapsed; ft=ft->anext)
-		;
-	if(ft && ft != f) {
-		f = ft;
-		dy += Dy(f->colr);
-	}
-	for(ft=f; ft && !ft->collapsed; ft=ft->aprev) {
-		first = ft;
-		nframe++;
-		dy += Dy(ft->colr);
-	}
-	for(ft=f->anext; ft && !ft->collapsed; ft=ft->anext) {
-		if(first == nil)
-			first = ft;
-		last = ft;
-		nframe++;
-		dy += Dy(ft->colr);
-	}
-	if(nframep) *nframep = nframe;
-	if(firstp) *firstp = first;
-	if(lastp) *lastp = last;
-	if(dyp) *dyp = dy;
-}
-
-int
-stack_count(Frame *f, int *mp) {
-	Frame *fp;
-	int n, m;
-
-	n = 0;
-	for(fp=f->aprev; fp && fp->collapsed; fp=fp->aprev)
-		n++;
-	m = ++n;
-	for(fp=f->anext; fp && fp->collapsed; fp=fp->anext)
-		n++;
-	if(mp) *mp = m;
-	return n;
-}
-
-Frame*
-stack_find(Area *a, Frame *f, int dir, bool stack) {
-	Frame *fp;
-
-	switch (dir) {
-	default:
-		die("not reached");
-	case North:
-		if(f)
-			for(f=f->aprev; f && f->collapsed && stack; f=f->aprev)
-				;
-		else {
-			f = nil;
-			for(fp=a->frame; fp; fp=fp->anext)
-				if(!fp->collapsed || !stack)
-					f = fp;
-		}
-		break;
-	case South:
-		if(f)
-			for(f=f->anext; f && f->collapsed && stack; f=f->anext)
-				;
-		else
-			for(f=a->frame; f && f->collapsed && stack; f=f->anext)
-				;
-		break;
-	}
-	return f;
-}
-
-/* TODO: Move elsewhere. */
-bool
-find(Area **ap, Frame **fp, int dir, bool wrap, bool stack) {
-	Rectangle r;
-	Frame *f;
-	Area *a;
-
-	f = *fp;
-	a = *ap;
-	r = f ? f->r : a->r;
-
-	if(dir == North || dir == South) {
-		*fp = stack_find(a, f, dir, stack);
-		if(*fp)
-			return true;
-		if (!a->floating)
-			*ap = area_find(a->view, r, dir, wrap);
-		if(!*ap)
-			return false;
-		*fp = stack_find(*ap, *fp, dir, stack);
-		return true;
-	}
-	if(dir != East && dir != West)
-		die("not reached");
-	*ap = area_find(a->view, r, dir, wrap);
-	if(!*ap)
-		return false;
-	*fp = ap[0]->sel;
-	return true;
+	v = a->view;
+	area_destroy(a);
+	columns_update(v);
 }
 
 void
@@ -284,7 +157,7 @@ column_detach(Frame *f) {
 			stack_scale(first, dy);
 		column_arrange(a, false);
 	}else if(a->view->areas[a->screen]->next)
-		area_destroy(a);
+		column_destroy(a);
 }
 
 static void column_scale(Area*);
@@ -292,14 +165,15 @@ static void column_scale(Area*);
 void
 column_attachrect(Area *a, Frame *f, Rectangle r) {
 	Frame *fp, *pos;
-	int before, after;
 
 	pos = nil;
 	for(fp=a->frame; fp; pos=fp, fp=fp->anext) {
 		if(r.max.y < fp->r.min.y || r.min.y > fp->r.max.y)
 			continue;
+		/*
 		before = fp->r.min.y - r.min.y;
 		after = -fp->r.max.y + r.max.y;
+		*/
 	}
 	column_insert(a, f, pos);
 	column_resizeframe_h(f, r);
@@ -443,12 +317,12 @@ column_settle(Area *a) {
 
 	if(n_uncol == 0) {
 		fprint(2, "%s: Badness: No uncollapsed frames, column %d, view %q\n",
-				argv0, area_idx(a), a->view->name);
+		       argv0, area_idx(a), a->view->name);
 		return;
 	}
 	if(surplus < 0)
 		fprint(2, "%s: Badness: surplus = %d in column_settle, column %d, view %q\n",
-				argv0, surplus, area_idx(a), a->view->name);
+		       argv0, surplus, area_idx(a), a->view->name);
 
 	yoff = a->r.min.y;
 	yoffcr = yoff;
@@ -497,7 +371,7 @@ comp_frame(const void *a, const void *b) {
 
 	ia = foo(*(Frame**)a);
 	ib = foo(*(Frame**)b);
-	/* 
+	/*
 	 * I'd like to favor the selected client, but
 	 * it causes windows to jump as focus changes.
 	 */
@@ -725,10 +599,14 @@ column_resizeframe(Frame *f, Rectangle r) {
 	if(al) {
 		al->r.max.x = a->r.min.x;
 		column_arrange(al, false);
+	}else {
+		v->pad[a->screen].min.x = r.min.x - v->r[a->screen].min.x;
 	}
 	if(ar) {
 		ar->r.min.x = a->r.max.x;
 		column_arrange(ar, false);
+	}else {
+		v->pad[a->screen].max.x = r.max.x - v->r[a->screen].max.x;
 	}
 
 	column_resizeframe_h(f, r);

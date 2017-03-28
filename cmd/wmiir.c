@@ -1,23 +1,33 @@
-/* Copyight ©2007-2009 Kris Maglione <fbsdaemon@gmail.com>
+/* Copyight ©2007-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #define IXP_NO_P9_
 #define IXP_P9_STRUCTS
+#include <dirent.h>
+#include <errno.h>
+#include <limits.h>
+#include <locale.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/signal.h>
 #include <time.h>
 #include <unistd.h>
+#include <wchar.h>
+
 #include <ixp.h>
-#include <util.h>
+#include <stuff/util.h>
+#include <bio.h>
 #include <fmt.h>
 
-static IxpClient *client;
+static IxpClient* client;
+static Biobuf*	outbuf;
+static bool	binary;
 
 static void
 usage(void) {
-	fprint(1,
-	       "usage: %s [-a <address>] {create | ls [-dlp] | read | remove | write} <file>\n"
+	lprint(1,
+	       "usage: %s [-a <address>] [-b] {create | ls [-dlp] | read | remove | write} <file>\n"
 	       "       %s [-a <address>] xwrite <file> <data>\n"
 	       "       %s -v\n", argv0, argv0, argv0);
 	exit(1);
@@ -28,21 +38,111 @@ errfmt(Fmt *f) {
 	return fmtstrcpy(f, ixp_errbuf());
 }
 
+static bool
+flush(IxpCFid *fid, char *in, int len, bool binary) {
+	static mbstate_t state;
+	static char buf[IXP_MAX_MSG];
+	static char *out = buf, *outend = buf + sizeof buf;
+	char *inend;
+	wchar_t w;
+	Rune r;
+	int res;
+
+	if(binary)
+		return ixp_write(fid, in, len) == len;
+
+	inend = in + len;
+	do {
+		if(in == nil || out + UTFmax > outend) {
+			if(ixp_write(fid, buf, out - buf) != out - buf)
+				return false;
+			out = buf;
+		}
+		if(in == nil) {
+			state = (mbstate_t){0};
+			return true;
+		}
+
+		switch((res = mbrtowc(&w, in, inend - in, &state))) {
+		case -1:
+			return false;
+		case 0:
+		case -2:
+			return true;
+		default:
+			in += res;
+			r = w < Runemax ? w : Runesync;
+			out += runetochar(out, &r);
+		}
+	} while(in < inend);
+	return true;
+}
+
+static bool
+unflush(int fd, char *in, int len, bool binary) {
+	static mbstate_t state;
+	static char buf[IXP_MAX_MSG], extra[UTFmax];
+	static char *out = buf, *outend = buf + sizeof buf;
+	static int nextra;
+	char *start;
+	Rune r;
+	int res, n;
+
+	if(binary)
+		return write(fd, in, len) == len;
+
+	if(in) {
+		if((n = nextra)) {
+			nextra = 0;
+			while(len > 0 && n < UTFmax && !fullrune(extra, n)) {
+				extra[n++] = *in++;
+				len--;
+			}
+			unflush(fd, extra, n, binary);
+		}
+		n = utfnlen(in, len);
+	}
+
+	start = in;
+	do {
+		if(in == nil || out + MB_LEN_MAX > outend) {
+			if(write(fd, buf, out - buf) != out - buf)
+				return false;
+			out = buf;
+		}
+		if(in == nil || n == 0) {
+			state = (mbstate_t){0};
+			return true;
+		}
+
+		in += chartorune(&r, in);
+		n--;
+		res = wcrtomb(out, r, &state);
+		if(res == -1)
+			*out++ = '?';
+		else
+			out += res;
+	} while(n > 0);
+
+	if(in < start + len) {
+		nextra = min(sizeof extra, len - (in - start));
+		memcpy(extra, in, nextra);
+	}
+	return true;
+}
+
 /* Utility Functions */
 static void
-write_data(IxpCFid *fid, char *name) {
-	void *buf;
+write_data(IxpCFid *fid, char *name, bool binary) {
+	char buf[IXP_MAX_MSG];
 	int len;
 
-	buf = emalloc(fid->iounit);;
-	for(;;) {
-		len = read(0, buf, fid->iounit);
-		if(len <= 0)
-			break;
-		if(ixp_write(fid, buf, len) != len)
+	while((len = read(0, buf, fid->iounit)) > 0)
+		if(!flush(fid, buf, len, binary))
 			fatal("cannot write file %q\n", name);
-	}
-	free(buf);
+
+	if(!binary)
+		flush(fid, nil, 0, binary);
 }
 
 static int
@@ -98,14 +198,14 @@ print_stat(Stat *s, int lflag, char *file, int pflag) {
 		file = "";
 
 	if(lflag)
-		print("%s %s %s %5llud %s %s%s%s\n",
-				modestr(s->mode), s->uid, s->gid, s->length,
-				timestr(s->mtime), file, slash, s->name);
+		Blprint(outbuf, "%s %s %s %5llud %s %s%s%s\n",
+			modestr(s->mode), s->uid, s->gid, s->length,
+			timestr(s->mtime), file, slash, s->name);
 	else {
 		if((s->mode&P9_DMDIR) && strcmp(s->name, "/"))
-			print("%s%s%s/\n", file, slash, s->name);
+			Blprint(outbuf, "%s%s%s/\n", file, slash, s->name);
 		else
-			print("%s%s%s\n", file, slash, s->name);
+			Blprint(outbuf, "%s%s%s\n", file, slash, s->name);
 	}
 }
 
@@ -125,7 +225,7 @@ xwrite(int argc, char *argv[]) {
 	if(fid == nil)
 		fatal("Can't open file '%s': %r\n", file);
 
-	write_data(fid, file);
+	write_data(fid, file, binary);
 	ixp_close(fid);
 	return 0;
 }
@@ -157,7 +257,7 @@ xawrite(int argc, char *argv[]) {
 			strcat(buf, " ");
 	}
 
-	if(ixp_write(fid, buf, nbuf) == -1)
+	if(!(flush(fid, buf, nbuf, binary) && (binary || flush(fid, 0, 0, binary))))
 		fatal("cannot write file '%s': %r\n", file);
 	ixp_close(fid);
 	free(buf);
@@ -180,7 +280,7 @@ xcreate(int argc, char *argv[]) {
 		fatal("Can't create file '%s': %r\n", file);
 
 	if((fid->qid.type&P9_DMDIR) == 0)
-		write_data(fid, file);
+		write_data(fid, file, binary);
 	ixp_close(fid);
 	return 0;
 }
@@ -197,7 +297,7 @@ xremove(int argc, char *argv[]) {
 	file = EARGF(usage());
 	do {
 		if(!ixp_remove(client, file))
-			fprint(2, "%s: Can't remove file '%s': %r\n", argv0, file);
+			lprint(2, "%s: Can't remove file '%s': %r\n", argv0, file);
 	}while((file = ARGF()));
 	return 0;
 }
@@ -222,12 +322,17 @@ xread(int argc, char *argv[]) {
 			fatal("Can't open file '%s': %r\n", file);
 
 		buf = emalloc(fid->iounit);
-		while((count = ixp_read(fid, buf, fid->iounit)) > 0)
-			write(1, buf, count);
+		while((count = ixp_read(fid, buf, fid->iounit)) > 0) {
+			unflush(1, buf, count, binary);
+			if (!binary && count < fid->iounit)
+				unflush(1, 0, 0, binary);
+		}
+		if(!binary)
+			unflush(1, 0, 0, binary);
 		ixp_close(fid);
 
 		if(count == -1)
-			fprint(2, "%s: cannot read file '%s': %r\n", argv0, file);
+			lprint(2, "%s: cannot read file '%s': %r\n", argv0, file);
 	} while((file = ARGF()));
 
 	return 0;
@@ -324,18 +429,57 @@ xnamespace(int argc, char *argv[]) {
 	path = ixp_namespace();
 	if(path == nil)
 		fatal("can't find namespace: %r\n");
-	print("%s\n", path);
+	Blprint(outbuf, "%s", path);
 	return 0;
+}
+
+static int
+xproglist(int argc, char *argv[]) {
+	DIR *d;
+	struct dirent *de;
+	struct stat st;
+	char *dir, *cwd;
+	int i;
+
+	quotefmtinstall();
+
+	ARGBEGIN{
+	default:
+		usage();
+	}ARGEND;
+
+	i = 7, cwd = nil;
+	do
+		cwd = erealloc(cwd, 1<<i);
+	while(!getcwd(cwd, 1<<i) && errno == ERANGE);
+
+	while((dir = ARGF()))
+		/* Don't use Blprint. wimenu expects UTF-8. */
+		if(!chdir(cwd) && !chdir(dir) && (d = opendir(dir))) {
+			while((de = readdir(d))) {
+				stat(de->d_name, &st);
+				if(S_ISREG(st.st_mode) && !access(de->d_name, X_OK))
+					Bprint(outbuf, "%q\n", de->d_name);
+			}
+			closedir(d);
+		}
+
+	return 0; /* NOTREACHED */
 }
 
 static int
 xsetsid(int argc, char *argv[]) {
 	char *av0;
+	bool dofork;
 
 	av0 = nil;
+	dofork = false;
 	ARGBEGIN{
 	case '0':
 		av0 = EARGF(usage());
+		break;
+	case 'f':
+		dofork = true;
 		break;
 	default:
 		usage();
@@ -346,6 +490,13 @@ xsetsid(int argc, char *argv[]) {
 		return 1;
 
 	setsid();
+	if(dofork)
+		switch(fork()) {
+		case 0:  break;
+		case -1: fatal("can't fork: %r\n");
+		default: return 0;
+		}
+
 	execvp(av0, argv);
 	fatal("setsid: can't exec: %r");
 	return 1; /* NOTREACHED */
@@ -368,6 +519,7 @@ struct exectab {
 }, utiltab[] = {
 	{"namespace", xnamespace},
 	{"ns", xnamespace},
+	{"proglist", xproglist},
 	{"setsid", xsetsid},
 	{0, }
 };
@@ -378,14 +530,22 @@ main(int argc, char *argv[]) {
 	exectab *tab;
 	int ret;
 
+	IXP_ASSERT_VERSION;
+
+	setlocale(LC_ALL, "");
+	binary = utf8locale();
+
 	quotefmtinstall();
 	fmtinstall('r', errfmt);
 
 	address = getenv("WMII_ADDRESS");
 
 	ARGBEGIN{
+	case 'b':
+		binary = true;
+		break;
 	case 'v':
-		print("%s-" VERSION ", " COPYRIGHT "\n", argv0);
+		lprint(1, "%s-" VERSION ", " COPYRIGHT "\n", argv0);
 		exit(0);
 	case 'a':
 		address = EARGF(usage());
@@ -397,9 +557,13 @@ main(int argc, char *argv[]) {
 	if(argc < 1)
 		usage();
 
+	outbuf = Bfdopen(1, OWRITE);
+
 	for(tab=utiltab; tab->cmd; tab++)
-		if(!strcmp(*argv, tab->cmd))
-			return tab->fn(argc, argv);
+		if(!strcmp(*argv, tab->cmd)) {
+			ret = tab->fn(argc, argv);
+			goto done;
+		}
 
 	if(address && *address)
 		client = ixp_mount(address);
@@ -407,6 +571,8 @@ main(int argc, char *argv[]) {
 		client = ixp_nsmount("wmii");
 	if(client == nil)
 		fatal("can't mount: %r\n");
+
+	signal(SIGPIPE, SIG_DFL);
 
 	for(tab=fstab; tab->cmd; tab++)
 		if(strcmp(*argv, tab->cmd) == 0) break;
@@ -416,6 +582,8 @@ main(int argc, char *argv[]) {
 	ret = tab->fn(argc, argv);
 
 	ixp_unmount(client);
+done:
+	Bterm(outbuf);
 	return ret;
 }
 

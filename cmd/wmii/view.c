@@ -1,5 +1,5 @@
 /* Copyright ©2004-2006 Anselm R. Garbe <garbeam at gmail dot com>
- * Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+ * Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #include "dat.h"
@@ -86,7 +86,6 @@ view_create(const char *name) {
 	for(i=0; i < nscreens; i++)
 		view_init(v, i);
 
-	
 	area_focus(v->firstarea);
 
 	v->next = *vp;
@@ -96,7 +95,7 @@ view_create(const char *name) {
 	/* FIXME: Can do better. */
 	for(c=client; c; c=c->next)
 		if(c != kludge)
-			apply_tags(c, c->tags);
+			client_applytags(c, c->tags);
 
 	view_arrange(v);
 	if(!selview)
@@ -108,6 +107,7 @@ view_create(const char *name) {
 void
 view_init(View *v, int iscreen) {
 	v->r[iscreen] = screens[iscreen]->r;
+	v->pad[iscreen] = ZR;
 	v->areas[iscreen] = nil;
 	column_new(v, nil, iscreen, 0);
 }
@@ -132,7 +132,7 @@ view_destroy(View *v) {
 	/* Detach frames held here by regex tags. */
 	/* FIXME: Can do better. */
 	foreach_frame(v, s, a, f)
-		apply_tags(f->client, f->client->tags);
+		client_applytags(f->client, f->client->tags);
 
 	foreach_area(v, s, a)
 		area_destroy(a);
@@ -149,6 +149,7 @@ view_destroy(View *v) {
 	}
 	free(v->areas);
 	free(v->r);
+	free(v->pad);
 	free(v);
 	ewmh_updateviews();
 }
@@ -207,26 +208,39 @@ view_update_rect(View *v) {
 	WMScreen *scrn;
 	Strut *strut;
 	Frame *f;
+	int left, right, top, bottom;
 	int s, i;
-	/* These short variable names are hell, eh? */
 
 	/* XXX:
 	if(v != selview)
 		return false;
 	*/
+
+	top = 0;
+	left = 0;
+	right = 0;
+	bottom = 0;
 	vec.n = 0;
 	for(f=v->floating->frame; f; f=f->anext) {
 		strut = f->client->strut;
 		if(!strut)
 			continue;
+		/* Can do better in the future. */
+		top = max(top, strut->top.max.y);
+		left = max(left, strut->left.max.x);
+		right = min(right, strut->right.min.x);
+		bottom = min(bottom, strut->bottom.min.y);
 		vector_rpush(&vec, strut->top);
 		vector_rpush(&vec, strut->left);
 		vector_rpush(&vec, rectaddpt(strut->right, Pt(scr.rect.max.x, 0)));
 		vector_rpush(&vec, rectaddpt(strut->bottom, Pt(0, scr.rect.max.y)));
 	}
-	/* Find the largest screen space not occupied by struts. */
 	vp = unique_rects(&vec, scr.rect);
-	scrnr = max_rect(vp);
+	scrnr = scr.rect;
+	scrnr.min.y += top;
+	scrnr.min.x += left;
+	scrnr.max.x += right;
+	scrnr.max.y += bottom;
 
 	/* FIXME: Multihead. */
 	v->floating->r = scr.rect;
@@ -253,6 +267,7 @@ view_update_rect(View *v) {
 			|| scrn->barpos != BTop && sr.max.y > rr.max.y)
 				rr = sr;
 		}
+
 		if(scrn->barpos == BTop) {
 			bar_sety(scrn, rr.min.y);
 			r.min.y = max(r.min.y, scrn->brect.max.y);
@@ -272,52 +287,72 @@ view_update(View *v) {
 	Area *a;
 	int s;
 
-	if(v != selview)
-		return;
-	if(starting)
-		return;
+	if(v == selview && !starting) {
+		frames_update_sel(v);
 
-	frames_update_sel(v);
+		foreach_frame(v, s, a, f)
+			if(f->client->fullscreen >= 0) {
+				f->collapsed = false;
+				if(!f->area->floating) {
+					f->oldarea = area_idx(f->area);
+					f->oldscreen = f->area->screen;
+					area_moveto(v->floating, f);
+					area_setsel(v->floating, f);
+				}else if(f->oldarea == -1)
+					f->oldarea = 0;
+			}
 
-	foreach_frame(v, s, a, f)
-		if(f->client->fullscreen >= 0) {
-			f->collapsed = false;
-			if(!f->area->floating) {
-				f->oldarea = area_idx(f->area);
-				f->oldscreen = f->area->screen;
-				area_moveto(v->floating, f);
-				area_setsel(v->floating, f);
-			}else if(f->oldarea == -1)
-				f->oldarea = 0;
+		view_arrange(v);
+
+		for(c=client; c; c=c->next) {
+			f = c->sel;
+			if((f && f->view == v)
+			&& (f->area == v->sel || !(f->area && f->area->max && f->area->floating))) {
+				if(f->area)
+					client_resize(c, f->r);
+			}else {
+				client_unmapframe(c);
+				client_unmap(c, IconicState);
+			}
+			ewmh_updatestate(c);
+			ewmh_updateclient(c);
 		}
 
-	view_arrange(v);
-
-	for(c=client; c; c=c->next) {
-		f = c->sel;
-		if((f && f->view == v)
-		&& (f->area == v->sel || !(f->area && f->area->max && f->area->floating))) {
-			if(f->area)
-				client_resize(c, f->r);
-		}else {
-			unmap_frame(c);
-			client_unmap(c, IconicState);
-		}
-		ewmh_updatestate(c);
-		ewmh_updateclient(c);
+		view_restack(v);
+		if(!v->sel->floating && view_fullscreen_p(v, v->sel->screen))
+			area_focus(v->floating);
+		else
+			area_focus(v->sel);
+		frame_draw_all();
 	}
+	view_update_urgency(v, nil);
+}
 
-	view_restack(v);
-	if(!v->sel->floating && view_fullscreen_p(v, v->sel->screen))
-		area_focus(v->floating);
-	else
-		area_focus(v->sel);
-	frame_draw_all();
+void
+view_update_urgency(View *v, char *from) {
+	Area *a;
+	Frame *f;
+	int s, urgent;
+
+	urgent = 0;
+	foreach_frame(v, s, a, f)
+		if (f->client->urgent) {
+			urgent++;
+			break;
+		}
+
+	if (urgent != v->urgent)
+		event("%sUrgentTag %s %s\n",
+		      urgent ? "" : "Not",
+		      from ? from : "Unknown",
+		      v->name);
+
+	v->urgent = urgent;
 }
 
 void
 view_focus(WMScreen *s, View *v) {
-	
+
 	USED(s);
 
 	_view_select(v);
@@ -345,18 +380,23 @@ view_attach(View *v, Frame *f) {
 	Client *c;
 	Frame *ff;
 	Area *a, *oldsel;
-	
+
 	c = f->client;
 
 	oldsel = v->oldsel;
 	a = v->sel;
-	if(client_floats_p(c)) {
+	if(c->floating == Never)
+		a = view_findarea(v, v->selscreen, v->selcol, false);
+	else if(client_floats_p(c)) {
 		if(v->sel != v->floating && c->fullscreen < 0)
 			oldsel = v->sel;
 		a = v->floating;
 	}
-	else if((ff = client_groupframe(c, v)))
+	else if((ff = client_groupframe(c, v))) {
 		a = ff->area;
+		if(v->oldsel && ff->client == view_selclient(v))
+			a = v->oldsel;
+	}
 	else if(v->sel->floating) {
 		if(v->oldsel)
 			a = v->oldsel;
@@ -368,9 +408,10 @@ view_attach(View *v, Frame *f) {
 		     || c->sel && c->sel->area && !c->sel->area->floating)
 			a = v->firstarea;
 	}
-	if(!a->floating && view_fullscreen_p(v, a->screen))
+	if(!a->floating && c->floating != Never && view_fullscreen_p(v, a->screen))
 		a = v->floating;
 
+	event("ViewAttach %s %#C\n", v->name, c);
 	area_attach(a, f);
 	/* TODO: Decide whether to focus this frame */
 	bool newgroup = !c->group
@@ -410,9 +451,9 @@ view_detach(Frame *f) {
 	if(c->sel == f)
 		c->sel = f->cnext;
 
-	if(v == selview)
-		view_update(v);
-	else if(empty_p(v))
+	event("ViewDetach %s %#C\n", v->name, c);
+	view_update(v);
+	if(v != selview && empty_p(v))
 		view_destroy(v);
 }
 
@@ -435,20 +476,13 @@ view_restack(View *v) {
 	Frame *f;
 	Area *a;
 	int s;
-	
+
 	if(v != selview)
 		return;
 
 	wins.n = 0;
 
-	/* *sigh */
 	for(f=v->floating->stack; f; f=f->snext)
-		if(f->client->w.ewmh.type & TypeDock)
-			vector_lpush(&wins, f->client->framewin->xid);
-		else
-			break;
-
-	for(; f; f=f->snext)
 		vector_lpush(&wins, f->client->framewin->xid);
 
 	for(int s=0; s < nscreens; s++)
@@ -578,19 +612,26 @@ view_update_all(void) {
 }
 
 uint
-view_newcolwidth(View *v, int num) {
+view_newcolwidth(View *v, int scrn, int num) {
 	Rule *r;
 	char *toks[16];
 	char buf[sizeof r->value];
 	ulong n;
 
+	/* XXX: Multihead. */
 	for(r=def.colrules.rule; r; r=r->next)
 		if(regexec(r->regex, v->name, nil, 0)) {
 			utflcpy(buf, r->value, sizeof buf);
 			n = tokenize(toks, 16, buf, '+');
+
 			if(num < n)
 				if(getulong(toks[num], &n))
-					return Dx(v->screenr) * (n / 100.0); /* XXX: Multihead. */
+					return Dx(v->r[scrn]) * (n / 100.0);
+				else if(!strcmp("px", strend(toks[num], 2))) {
+					toks[num][strlen(toks[num]) - 2] = '\0';
+					if(getulong(toks[num], &n))
+						return n;
+				}
 			break;
 		}
 	return 0;
@@ -613,13 +654,13 @@ view_index(View *v) {
 		for(f=a->frame; f; f=f->anext) {
 			r = &f->r;
 			if(a->floating)
-				bufprint("%a %C %d %d %d %d %s\n",
+				bufprint("%a %#C %d %d %d %d %s\n",
 						a, f->client,
 						r->min.x, r->min.y,
 						Dx(*r), Dy(*r),
 						f->client->props);
 			else
-				bufprint("%a %C %d %d %s\n",
+				bufprint("%a %#C %d %d %s\n",
 						a, f->client,
 						r->min.y, Dy(*r),
 						f->client->props);

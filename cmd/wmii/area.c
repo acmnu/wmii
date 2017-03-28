@@ -1,4 +1,4 @@
-/* Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+/* Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #include "dat.h"
@@ -85,17 +85,16 @@ area_create(View *v, Area *pos, int scrn, uint width) {
 	SET(index);
 	if(v->areas) { /* Creating a column. */
 		minwidth = column_minwidth();
-		index = pos ? area_idx(pos) : 1;
+		index = pos ? area_idx(pos) : 0;
 		numcols = 0;
 		for(a=v->areas[scrn]; a; a=a->next)
 			numcols++;
 
-		/* TODO: Need a better sizing/placing algorithm.
-		 */
+		/* TODO: Need a better sizing/placing algorithm. */
 		if(width == 0) {
 			if(numcols >= 0) {
-				width = view_newcolwidth(v, index);
-				if (width == 0)
+				width = view_newcolwidth(v, scrn, index);
+				if(width == 0)
 					width = Dx(v->r[scrn]) / (numcols + 1);
 			}
 			else
@@ -214,7 +213,7 @@ area_moveto(Area *to, Frame *f) {
 		return;
 
 	from = f->area;
-	if (from == to)
+	if(from == to)
 		return;
 
 	area_detach(f);
@@ -255,6 +254,7 @@ area_attach(Area *a, Frame *f) {
 		column_attach(a, f);
 
 	view_arrange(a->view);
+	event("AreaAttach %s %a %#C\n", a->view->name, a, f->client);
 
 	if(btassert("4 full", a->frame && a->sel == nil))
 		a->sel = a->frame;
@@ -268,12 +268,14 @@ area_detach(Frame *f) {
 	a = f->area;
 	v = a->view;
 
+	event("AreaDetach %s %a %#C\n", v->name, a, f->client);
 	if(a->floating)
 		float_detach(f);
 	else
 		column_detach(f);
 
 	if(v->sel->sel == nil && v->floating->sel)
+	if(!v->floating->sel->client->nofocus)
 		v->sel = v->floating;
 
 	view_arrange(v);
@@ -300,29 +302,18 @@ area_focus(Area *a) {
 	if(a != old_a)
 		v->oldsel = nil;
 
-	if((old_a) && (a->floating != old_a->floating)) {
+	if(old_a && a->floating != old_a->floating) {
 		v->revert = old_a;
 		if(v->floating->max)
 			view_update(v);
 	}
 
-	if(v != selview)
-		return;
+	if(v == selview) {
+		move_focus(old_a->sel, f);
+		client_focus(f ? f->client : nil);
 
-	move_focus(old_a->sel, f);
-
-	if(f)
-		client_focus(f->client);
-	else
-		client_focus(nil);
-
-	if(a != old_a) {
-		event("AreaFocus %a\n", a);
-		/* Deprecated */
-		if(a->floating)
-			event("FocusFloating\n");
-		else
-			event("ColumnFocus %d\n", area_idx(a));
+		if(a != old_a)
+			event("AreaFocus %a\n", a);
 	}
 }
 

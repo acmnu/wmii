@@ -1,4 +1,4 @@
-/* Copyright ©2006-2009 Kris Maglione <maglione.k at Gmail>
+/* Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
 #include "dat.h"
@@ -13,11 +13,27 @@ enum {
 		ButtonMask | PointerMotionMask
 };
 
-static void
-cwin_expose(Window *w, XExposeEvent *e) {
+static Cursor
+quad_cursor(Align align) {
+	switch(align) {
+	case NEast: return cursor[CurNECorner];
+	case NWest: return cursor[CurNWCorner];
+	case SEast: return cursor[CurSECorner];
+	case SWest: return cursor[CurSWCorner];
+	case South:
+	case North: return cursor[CurDVArrow];
+	case East:
+	case West:  return cursor[CurDHArrow];
+	default:    return cursor[CurMove];
+	}
+}
 
-	fill(w, rectsubpt(w->r, w->r.min), def.focuscolor.bg);
-	fill(w, w->r, def.focuscolor.bg);
+static bool
+cwin_expose(Window *w, void *aux, XExposeEvent *e) {
+
+	fill(w, rectsubpt(w->r, w->r.min), &def.focuscolor.bg);
+	fill(w, w->r, &def.focuscolor.bg);
+	return false;
 }
 
 static Handlers chandler = {
@@ -27,17 +43,16 @@ static Handlers chandler = {
 Window*
 constraintwin(Rectangle r) {
 	Window *w;
-	WinAttr wa;
 
-	w = createwindow(&scr.root, r, 0, InputOnly, &wa, 0);
+	w = createwindow(&scr.root, r, 0, InputOnly, nil, 0);
 	if(0) {
 		Window *w2;
 
-		w2 = createwindow(&scr.root, r, 0, InputOutput, &wa, 0);
+		w2 = createwindow(&scr.root, r, 0, InputOutput, nil, 0);
 		selectinput(w2, ExposureMask);
 		w->aux = w2;
 
-		setborder(w2, 1, def.focuscolor.border);
+		setborder(w2, 1, &def.focuscolor.border);
 		sethandler(w2, &chandler);
 		mapwin(w2);
 		raisewin(w2);
@@ -48,13 +63,9 @@ constraintwin(Rectangle r) {
 
 void
 destroyconstraintwin(Window *w) {
-	Window *w2;
 
-	if(w->aux) {
-		w2 = w->aux;
-		sethandler(w2, nil);
-		destroywindow(w2);
-	}
+	if(w->aux)
+		destroywindow(w->aux);
 	destroywindow(w);
 }
 
@@ -62,8 +73,8 @@ static Window*
 gethsep(Rectangle r) {
 	Window *w;
 	WinAttr wa;
-	
-	wa.background_pixel = def.normcolor.border.pixel;
+
+	wa.background_pixel = pixelvalue(&scr.root, &def.normcolor.border);
 	w = createwindow(&scr.root, r, scr.depth, InputOutput, &wa, CWBackPixel);
 	mapwin(w);
 	raisewin(w);
@@ -137,7 +148,7 @@ Align
 snap_rect(const Rectangle *rects, int num, Rectangle *r, Align *mask, int snap) {
 	Align ret;
 	Point d;
-	
+
 	d.x = snap+1;
 	d.y = snap+1;
 
@@ -171,14 +182,15 @@ readmouse(Point *p, uint *button) {
 	XEvent ev;
 
 	for(;;) {
-		XMaskEvent(display, MouseMask|ExposureMask|StructureNotifyMask|PropertyChangeMask, &ev);
+		XMaskEvent(display, MouseMask|ExposureMask|PropertyChangeMask, &ev);
+		debug_event(&ev);
 		switch(ev.type) {
-		case ConfigureNotify:
 		case Expose:
 		case NoExpose:
 		case PropertyNotify:
-			dispatch_event(&ev);
+			event_dispatch(&ev);
 		default:
+			Dprint(DEvent, "readmouse(): ignored: %E\n", &ev);
 			continue;
 		case ButtonPress:
 		case ButtonRelease:
@@ -186,6 +198,10 @@ readmouse(Point *p, uint *button) {
 		case MotionNotify:
 			p->x = ev.xmotion.x_root;
 			p->y = ev.xmotion.y_root;
+			if(p->x == scr.rect.max.x - 1)
+				p->x = scr.rect.max.x;
+			if(p->y == scr.rect.max.y - 1)
+				p->y = scr.rect.max.y;
 			break;
 		}
 		return ev.type;
@@ -207,7 +223,7 @@ readmotion(Point *p) {
 
 static void
 mouse_resizecolframe(Frame *f, Align align) {
-	Window *cwin, *hwin;
+	Window *cwin, *hwin = nil;
 	Divide *d;
 	View *v;
 	Area *a;
@@ -229,86 +245,100 @@ mouse_resizecolframe(Frame *f, Align align) {
 		d = d->next;
 	}
 
-	if(align&East)
+	if(align & East)
 		d = d->next;
 
 	min.x = column_minwidth();
 	min.y = /*frame_delta_h() +*/ labelh(def.font);
 	/* Set the limits of where this box may be dragged. */
-#define frob(pred, f, aprev, rmin, rmax, plus, minus, xy) BLOCK(     \
+#define frob(pred, f, aprev, rmin, rmax, plus, minus, xy, use_screen) BLOCK( \
 		if(pred) {                                           \
 			r.rmin.xy = f->aprev->r.rmin.xy plus min.xy; \
 			r.rmax.xy = f->r.rmax.xy minus min.xy;       \
+		}else if(use_screen) {                               \
+			r.rmin.xy = v->r[f->screen].rmin.xy plus 1;  \
+			r.rmax.xy = a->r.rmax.xy minus min.xy;       \
 		}else {                                              \
 			r.rmin.xy = a->r.rmin.xy;                    \
 			r.rmax.xy = r.rmin.xy plus 1;                \
 		})
-	if(align&North)
-		frob(f->aprev, f, aprev, min, max, +, -, y);
-	else
-		frob(f->anext, f, anext, max, min, -, +, y);
-	if(align&West)
-		frob(a->prev,  a, prev,  min, max, +, -, x);
-	else
-		frob(a->next,  a, next,  max, min, -, +, x);
+
+	r = f->r;
+	if(align & North)
+		frob(f->aprev, f, aprev, min, max, +, -, y, false);
+	else if(align & South)
+		frob(f->anext, f, anext, max, min, -, +, y, false);
+	if(align & West)
+		frob(a->prev,  a, prev,  min, max, +, -, x, true);
+	else if(align & East)
+		frob(a->next,  a, next,  max, min, -, +, x, true);
 #undef frob
 
 	cwin = constraintwin(r);
 
 	r = f->r;
-	if(align&North)
+	if(align & North)
 		r.min.y--;
-	else
+	else if(align & South)
 		r.min.y = r.max.y - 1;
 	r.max.y = r.min.y + 2;
 
-	hwin = gethsep(r);
+	if(align & (North|South))
+		hwin = gethsep(r);
 
 	if(!grabpointer(&scr.root, cwin, cursor[CurSizing], MouseMask))
 		goto done;
 
-	pt.x = ((align&West) ? f->r.min.x : f->r.max.x);
-	pt.y = ((align&North) ? f->r.min.y : f->r.max.y);
+	pt.x = (align & West ? f->r.min.x : f->r.max.x);
+	pt.y = (align & North ? f->r.min.y : f->r.max.y);
 	warppointer(pt);
 
 	while(readmotion(&pt)) {
-		if(align&West)
+		if(align & West)
 			r.min.x = pt.x;
-		else
+		else if(align & East)
 			r.max.x = pt.x;
-		r.min.y = ((align&South) ? pt.y : pt.y-1);
+
+		if(align & South)
+			r.min.y = pt.y;
+		else if(align & North)
+			r.min.y = pt.y - 1;
 		r.max.y = r.min.y+2;
 
-		div_set(d, pt.x);
-		reshapewin(hwin, r);
+		if(align & (East|West))
+			div_set(d, pt.x);
+		if(hwin)
+			reshapewin(hwin, r);
 	}
 
 	r = f->r;
-	if(align&West)
+	if(align & West)
 		r.min.x = pt.x;
-	else
+	else if(align & East)
 		r.max.x = pt.x;
-	if(align&North)
+	if(align & North)
 		r.min.y = pt.y;
-	else
+	else if(align & South)
 		r.max.y = pt.y;
 	column_resizeframe(f, r);
 
 	/* XXX: Magic number... */
-	if(align&West)
+	if(align & West)
 		pt.x = f->r.min.x + 4;
-	else
+	else if(align & East)
 		pt.x = f->r.max.x - 4;
-	if(align&North)
+
+	if(align & North)
 		pt.y = f->r.min.y + 4;
-	else
+	else if(align & South)
 		pt.y = f->r.max.y - 4;
 	warppointer(pt);
 
 done:
 	ungrabpointer();
 	destroyconstraintwin(cwin);
-	destroywindow(hwin);
+	if (hwin)
+		destroywindow(hwin);
 }
 
 void
@@ -399,6 +429,7 @@ mouse_resize(Client *c, Align align, bool grabmod) {
 
 	SET(hrx);
 	SET(hry);
+
 	if(align != Center) {
 		hr = subpt(frect.max, frect.min);
 		hr = divpt(hr, Pt(2, 2));
@@ -428,7 +459,7 @@ mouse_resize(Client *c, Align align, bool grabmod) {
 		warppointer(d);
 	}
 	sync();
-	flushevents(PointerMotionMask, false);
+	event_flush(PointerMotionMask, false);
 
 	while(readmotion(&d)) {
 		if(align == Center) {
@@ -588,25 +619,28 @@ mouse_checkresize(Frame *f, Point p, bool exec) {
 	int q;
 
 	cur = cursor[CurNormal];
-	if(rect_haspoint_p(p, f->crect)) {
+	if(rect_haspoint_p(f->crect, p)) {
 		client_setcursor(f->client, cur);
 		return;
 	}
 
 	r = rectsubpt(f->r, f->r.min);
 	q = quadrant(r, p);
-	if(rect_haspoint_p(p, f->grabbox)) {
+	if(rect_haspoint_p(f->grabbox, p)) {
 		cur = cursor[CurTCross];
-		if(exec) mouse_movegrabbox(f->client, false);
+		if(exec)
+			mouse_movegrabbox(f->client, false);
 	}
 	else if(f->area->floating) {
-		if(p.x <= 2 || p.y <= 2
+		if(p.x <= 2
+		|| p.y <= 2
 		|| r.max.x - p.x <= 2
 		|| r.max.y - p.y <= 2) {
 			cur = quad_cursor(q);
-			if(exec) mouse_resize(f->client, q, false);
+			if(exec)
+				mouse_resize(f->client, q, false);
 		}
-		else if(exec && rect_haspoint_p(p, f->titlebar))
+		else if(exec && rect_haspoint_p(f->titlebar, p))
 			mouse_movegrabbox(f->client, true);
 	}else {
 		if(f->aprev && p.y <= 2
@@ -624,7 +658,7 @@ mouse_checkresize(Frame *f, Point p, bool exec) {
 static void
 _grab(XWindow w, uint button, ulong mod) {
 	XGrabButton(display, button, mod, w, false, ButtonMask,
-			GrabModeSync, GrabModeAsync, None, None);
+			GrabModeSync, GrabModeSync, None, None);
 }
 
 /* Doesn't belong here */

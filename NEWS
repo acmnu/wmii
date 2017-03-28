@@ -1,5 +1,24 @@
+3.10b1:
+    * /colrules widths may now be specified in pixels.
+    * /tagrules has been replaced with the more general /rules
+    * The format of the bar files has changed.
+    * Add witray system tray program.
+    * Floating clients can be collapsed by clicking their layout boxes.
+    * Dock windows act more like dock windows.
+    * The FocusFloating and FocusColumn events have been removed.
+    * The tag '!' is no longer special.
+    * Xft is now loaded on demand.
 
-3.9b1:
+3.9.2:             
+    * Fixed some managed move bugs.
+    * Work around mawk bug that broke wmiirc.
+
+3.9.1:
+    * Workaround a dash 0.5.6 bug that broke wmiirc.
+    * Noticably speed-up python wmiirc startup.
+    * Disable static linking which breaks wmiir in glibc 2.12.
+
+3.9:
     * wmii9menu is now Xinerama aware.
     * Install READMEs to $(PREFIX)/share/doc/wmii/.
     * Documentation updates. Add wmiir.1, wmii9menu.1.

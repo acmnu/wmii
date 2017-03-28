@@ -18,6 +18,9 @@ identity = lambda k: k
 # Configuration should be placed in that file, and this file
 # left unmodified, if possible. wmiirc_local should import
 # wmiirc or any other modules it needs.
+#
+# Do *not* copy this file to wmiirc_local.py lest you want it
+# executed twice.
 
 # Keys
 keys.defs = dict(
@@ -42,11 +45,12 @@ wmii['grabmod'] = keys.defs['mod']
 wmii['border'] = 2
 
 def setbackground(color):
-    call('xsetroot', '-solid', color)
+    call('xsetroot', '-solid', color, background=True)
 setbackground(background)
 
 terminal = 'wmiir', 'setsid', '@TERMINAL@'
 pygmi.shell = os.environ.get('SHELL', 'sh')
+tray = 'witray',
 
 @defmonitor
 def load(self):
@@ -55,18 +59,22 @@ def load(self):
 def time(self):
     return wmii.cache['focuscolors'], datetime.datetime.now().strftime('%c')
 
-wmii.colrules = (
-    ('gimp', '17+83+41'),
-    ('.*', '62+38 # Golden Ratio'),
-)
+wmii.rules = (
+    # Apps with system tray icons like to their main windows
+    # Give them permission.
+    (ur'^Pidgin:',       dict(allow='+activate')),
 
-wmii.tagrules = (
-    ('MPlayer|VLC', '~'),
+    # MPlayer and VLC don't float by default, but should.
+    (ur'MPlayer|VLC',   dict(floating=True)),
+
+    # ROX puts all of its windows in the same group, so they open
+    # with the same tags.  Disable grouping for ROX Filer.
+    (ur'^ROX-Filer:',   dict(group=0)),
 )
 
 def unresponsive_client(client):
     msg = 'The following client is not responding. What would you like to do?'
-    resp = call('wihack', '-transient', client.id,
+    resp = call('wihack', '-transient', str(client.id),
                 'xmessage', '-nearmouse', '-buttons', 'Kill,Wait', '-print',
                 '%s\n  %s' % (msg, client.label))
     if resp == 'Kill':
@@ -95,9 +103,9 @@ events.bind({
 
     'Notice':       lambda args: notice.show(args),
 
-    Match(('LeftBarClick', 'LeftBarDND'), '1'): lambda e, b, tag: tags.select(tag),
-    Match('LeftBarClick', '4'): lambda *a: tags.select(tags.next(True)),
-    Match('LeftBarClick', '5'): lambda *a: tags.select(tags.next()),
+    Match(('LeftBarClick', 'LeftBarDND'), 1): lambda e, b, tag: tags.select(tag),
+    Match('LeftBarClick', 4): lambda *a: tags.select(tags.next(True)),
+    Match('LeftBarClick', 5): lambda *a: tags.select(tags.next()),
 
     Match('LeftBarMouseDown', 3):   lambda e, n, tag: clickmenu((
             ('Delete',     lambda t: Tag(t).delete()),
@@ -292,7 +300,7 @@ addresize('',         'Grow', 'grow')
 addresize('Control-', 'Shrink', 'grow', '-1')
 addresize('Shift-',   'Nudge', 'nudge')
 
-Actions.rehash()
+Thread(target=lambda: Actions.rehash()).start()
 
 if not os.environ.get('WMII_NOPLUGINS', ''):
     dirs = filter(curry(os.access, _, os.R_OK),
@@ -301,8 +309,10 @@ if not os.environ.get('WMII_NOPLUGINS', ''):
                    reduce(operator.add, map(os.listdir, dirs), []))
     for f in ['wmiirc_local'] + ['plugins.%s' % file[:-3] for file in files]:
         try:
-            exec 'import %s' % f
+            __import__(f)
         except Exception, e:
             traceback.print_exc(sys.stdout)
+
+call(*tray, background=True)
 
 # vim:se sts=4 sw=4 et:

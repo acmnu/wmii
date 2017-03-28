@@ -1,8 +1,6 @@
-/* Copyright ©2006-2009 Kris Maglione <fbsdaemon@gmail.com>
+/* Copyright ©2006-2010 Kris Maglione <maglione.k at Gmail>
  * See LICENSE file for license details.
  */
-#define IXP_NO_P9_
-#define IXP_P9_STRUCTS
 #define EXTERN
 #include "dat.h"
 #include <X11/Xproto.h>
@@ -10,7 +8,7 @@
 #include <strings.h>
 #include <unistd.h>
 #include <bio.h>
-#include <clientutil.h>
+#include <stuff/clientutil.h>
 #include "fns.h"
 #define link _link
 
@@ -19,36 +17,18 @@ static Biobuf*	cmplbuf;
 static Biobuf*	inbuf;
 static bool	alwaysprint;
 static char*	cmdsep;
+static int	screen_hint;
 
 static void
 usage(void) {
-	fatal("usage: wimenu -i [-h <history>] [-a <address>] [-p <prompt>] [-s <screen>]\n");
+	fprint(2, "usage: %s -i [-a <address>] [-h <history>] [-p <prompt>] [-r <rows>] [-s <screen>]\n", argv0);
+	fprint(2, "       See manual page for full usage details.\n");
+	exit(1);
 }
 
 static int
 errfmt(Fmt *f) {
 	return fmtstrcpy(f, ixp_errbuf());
-}
-
-/* Stubs. */
-void
-debug(int flag, const char *fmt, ...) {
-	va_list ap;
-
-	USED(flag);
-	va_start(ap, fmt);
-	vfprint(2, fmt, ap);
-	va_end(ap);
-}
-
-void dprint(long, char*, ...);
-void dprint(long mask, char *fmt, ...) {
-	va_list ap;
-
-	USED(mask);
-	va_start(ap, fmt);
-	vfprint(2, fmt, ap);
-	va_end(ap);
 }
 
 static inline void
@@ -70,13 +50,13 @@ populate_list(Biobuf *buf, bool hist) {
 	bool stop;
 
 	stop = !hist && !isatty(buf->fid);
+	ret.next_link = nil;
 	i = &ret;
 	while((p = Brdstr(buf, '\n', true))) {
 		if(stop && p[0] == '\0')
 			break;
-		link(i, emallocz(sizeof *i));
-		i->next_link = i->next;
-		i = i->next;
+		i->next_link = emallocz(sizeof *i);
+		i = i->next_link;
 		i->string = p;
 		i->retstring = p;
 		if(cmdsep && (p = strstr(p, cmdsep))) {
@@ -85,15 +65,12 @@ populate_list(Biobuf *buf, bool hist) {
 		}
 		if(!hist) {
 			i->len = strlen(i->string);
-			i->width = textwidth_l(font, i->string, i->len);
-			if(i->width > maxwidth)
-				maxwidth = i->width;
+			i->width = textwidth_l(font, i->string, i->len) + itempad;
+			match.maxwidth = max(i->width, match.maxwidth);
 		}
 	}
 
-	link(i, &ret);
-	splice(&ret);
-	return ret.next != &ret ? ret.next : nil;
+	return ret.next_link;
 }
 
 static void
@@ -106,7 +83,7 @@ check_competions(IxpConn *c) {
 		return;
 	}
 	input.filter_start = strtol(s, nil, 10);
-	items = populate_list(cmplbuf, false);
+	match.all = populate_list(cmplbuf, false);
 	update_filter(false);
 	menu_draw();
 }
@@ -163,41 +140,22 @@ update_filter(bool print) {
 	if(input.pos < input.end)
 		filter = freelater(estrndup(filter, input.pos - filter));
 
-	matchidx = nil;
-	matchfirst = matchstart = filter_list(items, filter);
+	match.sel = nil;
+	match.first = match.start = filter_list(match.all, filter);
 	if(print)
 		update_input();
-}
-
-ErrorCode ignored_xerrors[] = {
-	{ 0, }
-};
-
-static void
-end(IxpConn *c) {
-
-	USED(c);
-	srv.running = 0;
-}
-
-static void
-preselect(IxpServer *s) {
-	
-	USED(s);
-	check_x_event(nil);
 }
 
 enum { PointerScreen = -1 };
 
 void
-init_screens(int screen_hint) {
+init_screens(void) {
 	Rectangle *rects;
 	Point p;
 	int i, n;
 
 	rects = xinerama_screens(&n);
-	if (screen_hint >= 0 && screen_hint < n)
-		/* We were given a valid screen index, use that. */
+	if(screen_hint >= 0 && screen_hint < n)
 		i = screen_hint;
 	else {
 		/* Pick the screen with the pointer, for now. Later,
@@ -205,7 +163,7 @@ init_screens(int screen_hint) {
 		 */
 		p = querypointer(&scr.root);
 		for(i=0; i < n; i++)
-			if(rect_haspoint_p(p, rects[i]))
+			if(rect_haspoint_p(rects[i], p))
 				break;
 		if(i == n)
 			i = 0;
@@ -214,21 +172,26 @@ init_screens(int screen_hint) {
 	menu_show();
 }
 
+ErrorCode ignored_xerrors[] = {
+	{ 0, BadWindow },
+	{ X_GetAtomName, BadAtom },
+};
+
 int
 main(int argc, char *argv[]) {
-	Item *item;
 	static char *address;
 	static char *histfile;
 	static char *keyfile;
 	static bool nokeys;
+	Item *item;
 	int i;
 	long ndump;
-	int screen;
 
-	quotefmtinstall();
+	setlocale(LC_ALL, "");
 	fmtinstall('r', errfmt);
-	address = getenv("WMII_ADDRESS");
-	screen = PointerScreen;
+	quotefmtinstall();
+
+	screen_hint = PointerScreen;
 
 	find = strstr;
 	compare = strncmp;
@@ -258,16 +221,19 @@ main(int argc, char *argv[]) {
 		ndump = strtol(EARGF(usage()), nil, 10);
 		break;
 	case 'p':
-		prompt = EARGF(usage());
+		menu.prompt = EARGF(usage());
+		break;
+	case 'r':
+		menu.rows = strtol(EARGF(usage()), nil, 10);
 		break;
 	case 's':
-		screen = strtol(EARGF(usage()), nil, 10);
+		screen_hint = strtol(EARGF(usage()), nil, 10);
 		break;
 	case 'S':
 		cmdsep = EARGF(usage());
 		break;
 	case 'v':
-		print("%s", version);
+		lprint(1, "%s", version);
 		return 0;
 	default:
 		usage();
@@ -275,8 +241,6 @@ main(int argc, char *argv[]) {
 
 	if(argc)
 		usage();
-
-	setlocale(LC_CTYPE, "");
 
 	initdisplay();
 
@@ -286,20 +250,16 @@ main(int argc, char *argv[]) {
 
 	client_init(address);
 
-	srv.preselect = preselect;
-	ixp_listen(&srv, ConnectionNumber(display), nil, check_x_event, end);
+	srv.preselect = event_preselect;
+	ixp_listen(&srv, ConnectionNumber(display), nil, event_fdready, event_fdclosed);
 
-	ontop = !strcmp(readctl("bar on "), "top");
-	loadcolor(&cnorm, readctl("normcolors "));
-	loadcolor(&csel, readctl("focuscolors "));
-	font = loadfont(readctl("font "));
-	sscanf(readctl("fontpad "), "%d %d %d %d", &font->pad.min.x, &font->pad.max.x,
-	       &font->pad.min.x, &font->pad.max.y);
-	if(!font)
-		fatal("Can't load font %q", readctl("font "));
+	menu.ontop = !strcmp(readctl("/ctl", "bar "), "on top");
+	client_readconfig(&cnorm, &csel, &font);
+
+	itempad = (font->height & ~1) + font->pad.min.x + font->pad.max.x;
 
 	cmplbuf = Bfdopen(0, OREAD);
-	items = populate_list(cmplbuf, false);
+	match.all = populate_list(cmplbuf, false);
 	if(!isatty(cmplbuf->fid))
 		ixp_listen(&srv, cmplbuf->fid, inbuf, check_competions, nil);
 
@@ -314,24 +274,21 @@ main(int argc, char *argv[]) {
 			parse_keys(buffer);
 	}
 
-	histidx = &hist;
+	histsel = &hist;
 	link(&hist, &hist);
-	if(histfile) {
-		inbuf = Bopen(histfile, OREAD);
-		if(inbuf) {
-			item = populate_list(inbuf, true);
-			if(item) {
-				link(item->prev, &hist);
-				link(&hist, item);
-			}
-			Bterm(inbuf);
+	if(histfile && (inbuf = Bopen(histfile, OREAD))) {
+		item = filter_list(populate_list(inbuf, true), "");
+		if(item->string) {
+			link(item->prev, &hist);
+			link(&hist, item);
 		}
+		Bterm(inbuf);
 	}
 
-	if(barwin == nil)
+	if(menu.win == nil)
 		menu_init();
 
-	init_screens(screen);
+	init_screens();
 
 	i = ixp_serverloop(&srv);
 	if(i)

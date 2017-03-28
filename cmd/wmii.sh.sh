@@ -85,24 +85,25 @@ _wi_script() {
 }
 
 _wi_text() {
-	cat <<'!'
-Event Start
-	if [ "$1" = "$wmiiscript" ]; then
-		exit
-	fi
-Event Key
-	Key "$@"
-!
 	eval "cat <<!
 $( (test ! -t 0 && cat; for a; do eval "$a"; done) | sed '/^[ 	]/s/\([$`\\]\)/\\\1/g')
 !
 "
 }
 
+_wi_events=""
 wi_events() {
-	#cho "$(_wi_text "$@" | awk "$(_wi_script)")" | cat -n
-	eval "$(_wi_text "$@" | awk "$(_wi_script)")"
+	eval=""; [ "$1" = -e ] && eval=1 && shift
+	_wi_events="$(_wi_text "$@")
+$_wi_events"
+	# -n "$eval" ] && printf %s "$_wi_events" | awk "$(_wi_script)" >&2
+	[ -n "$eval" ] && eval "$(printf %s "$_wi_events" | awk "$(_wi_script)")"
 }
+
+wi_events <<'!'
+Event Key
+	Key "$@"
+!
 
 wi_fatal() {
 	echo $scriptname: Fatal: $*
@@ -135,9 +136,7 @@ wi_fnmenu() {
 }
 
 wi_proglist() {
-        ls -lL $(echo $* | sed 'y/:/ /') 2>/dev/null \
-		| awk '$1 ~ /^[^d].*x/ { print $NF }' \
-		| sort | uniq
+        wmiir proglist -- $(echo $* | sed 'y/:/ /') | sort | uniq
 }
 
 wi_actions() {
@@ -190,16 +189,27 @@ wi_selclient() {
 	wmiir read /client/sel/ctl | sed 1q | tr -d '\012'
 }
 
+wi_nexttag() {
+	awk -v curtag=$(wi_seltag) '
+		NR==1 {first = $0}
+		$0==curtag { if(getline) print $0; else print first; exit }'
+}
+
 wi_eventloop() {
 	echo "$Keys" | wmiir write /keys
 
-	wmiir read /event | while read wi_event
-	do
+	if [ "$1" = -i ]
+	then cat
+	else wmiir read /event
+	fi |
+	while read wi_event; do
 		IFS="$wi_newline"
 		wi_arg=$(echo "$wi_event" | sed 's/^[^ ]* //')
 		unset IFS
 		set -- $wi_event
 		event=$1; shift
+		[ "$event" = Start -a "$1" = "$wmiiscript" ] &&
+			exit
 		Event $event "$@"
 	done
 	true
