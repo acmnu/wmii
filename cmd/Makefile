@@ -18,4 +18,3 @@ LIBS += $(LIBS9) $(LIBIXP)
 
 include $(ROOT)/mk/many.mk
 include $(ROOT)/mk/dir.mk
-
